@@ -28,8 +28,8 @@
 - **Windows 11 TSF 输入法自动保存与恢复**：
   - 接管电视期间自动将 Windows 切换为 `ENG`，避免与电视端输入法（如 Fcitx5 / Trime）抢占 `Shift` 与字母键；
   - 切回电脑 DP 时通过 Windows TSF COM 接口（`ITfInputProcessorProfileMgr`）自动还原回切换前的中文输入法（微软拼音 / 小狼毫等）。
-- **极致轻量**：
-  - C# (.NET Framework 4) 单文件仅 ~73 KB，后台常驻内存约 27 MB，待机 CPU 0%。
+- **极致轻量（Rust 原生重写版 v2.0）**：
+  - 纯 Rust + Win32 / GDI+（仅单一依赖 `windows-sys`），零运行库依赖（不依赖 .NET / VC++ / WebView2），独立单文件仅 ~400 KB，待机 CPU 0%，内存占用较 C# 版（`v1.0-csharp`）大幅降低。
 
 ## 环境要求
 
@@ -37,18 +37,21 @@
    - Redmi G Pro 27U（已开启无线 ADB 5555 端口；推荐已 Root 并配合 `MiTV ADB Keeper` 模块保持开机常开 ADB）。
    - 电脑与电视处于同一局域网（建议在路由器后台为电视绑定静态 IP）。
 2. **电脑端**：
-   - Windows 10 / 11（自带 .NET Framework 4，无需额外运行库）。
+   - Windows 10 / 11（纯原生 Win32 可执行文件，无需任何额外运行库）。
    - 下载 [scrcpy Windows 64-bit](https://github.com/Genymobile/scrcpy/releases/latest) 解压到本目录下的 `scrcpy/` 文件夹（确保存在 `scrcpy\scrcpy.exe` 和 `scrcpy\adb.exe`）。
 
 ## 从源码构建
 
-无需安装 Visual Studio 或任何第三方 SDK，直接运行：
+需要 Rust 工具链（MSVC 或 MinGW/GNU 均可）：
 
 ```powershell
-.\build.ps1
+cargo build --release
+copy target\release\MiTV-Switch.exe .\MiTV-Switch.exe
 ```
 
-编译完成后直接运行根目录生成的 `MiTV-Switch.exe`，在右下角托盘弹出面板中点击 **「ADB 设置...」** 填入电视 IP（如 `192.168.1.200:5555`）即可使用。
+编译完成后直接运行根目录的 `MiTV-Switch.exe`，在右下角托盘弹出面板中点击 **「ADB 设置...」** 填入电视 IP（如 `192.168.1.200:5555`）即可使用。
+
+> 如需旧版无外部依赖的 C# (.NET Framework 4) 源码，请切换至 `v1.0-csharp` 标签或 `main` 分支。
 
 ## 致谢与许可
 
