@@ -101,7 +101,7 @@ where
             WS_EX_TOPMOST,
             cls_w.as_ptr(),
             to_wide("ADB 与键鼠设置 — G Pro 27U").as_ptr(),
-            style | WS_VISIBLE,
+            style,
             (sw - ww) / 2,
             (sh - wh) / 2,
             ww,
@@ -188,6 +188,7 @@ where
                 on_saved: Some(Box::new(on_saved)),
             });
         });
+        ShowWindow(hwnd, SW_SHOW);
         SetForegroundWindow(hwnd);
     }
 }

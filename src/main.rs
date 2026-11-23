@@ -248,20 +248,22 @@ fn start_control_only() {
 }
 
 fn update_tray_takeover_visual(active: bool) {
-    with_host(|h| unsafe {
-        let icon = if active { h.active_icon } else { h.idle_icon };
+    let info = with_host(|h| (h.hwnd, if active { h.active_icon } else { h.idle_icon }));
+    if let Some((hwnd, icon)) = info {
         let tip = if active {
             "G Pro 27U 键鼠接管中 (Ctrl+Alt+D 切回电脑 DP)"
         } else {
             "G Pro 27U 信号源 / 背光 / 键鼠控制"
         };
-        set_tray_icon_state(h.hwnd, icon, tip, false);
-        if active {
-            SetTimer(h.hwnd, TIMER_IME_GUARD, 150, None);
-        } else {
-            KillTimer(h.hwnd, TIMER_IME_GUARD);
+        unsafe {
+            set_tray_icon_state(hwnd, icon, tip, false);
+            if active {
+                SetTimer(hwnd, TIMER_IME_GUARD, 150, None);
+            } else {
+                KillTimer(hwnd, TIMER_IME_GUARD);
+            }
         }
-    });
+    }
 }
 
 fn toggle_flyout_panel() {
@@ -290,16 +292,19 @@ fn open_settings() {
 }
 
 fn exit_app() {
-    with_host(|h| unsafe {
-        if let Ok(mut to) = h.takeover.lock() {
+    let info = with_host(|h| (h.hwnd, h.idle_icon, h.active_icon, Arc::clone(&h.takeover)));
+    if let Some((hwnd, idle_icon, active_icon, takeover)) = info {
+        if let Ok(mut to) = takeover.lock() {
             to.stop();
         }
-        KillTimer(h.hwnd, TIMER_IME_GUARD);
-        remove_tray_icon(h.hwnd);
-        DestroyIcon(h.idle_icon);
-        DestroyIcon(h.active_icon);
-        PostQuitMessage(0);
-    });
+        unsafe {
+            KillTimer(hwnd, TIMER_IME_GUARD);
+            remove_tray_icon(hwnd);
+            DestroyIcon(idle_icon);
+            DestroyIcon(active_icon);
+            PostQuitMessage(0);
+        }
+    }
 }
 
 unsafe fn show_right_click_menu(hwnd: HWND) {

@@ -76,7 +76,7 @@ impl AppConfig {
         }
         if let Ok(text) = fs::read_to_string(&cfg.path) {
             for raw in text.lines() {
-                let line = raw.trim();
+                let line = raw.trim().trim_start_matches('\u{FEFF}');
                 if line.is_empty() || line.starts_with('#') {
                     continue;
                 }

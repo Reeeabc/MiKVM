@@ -281,36 +281,35 @@ pub fn was_just_hidden() -> bool {
 }
 
 pub fn show_flyout_near_tray() {
-    FLYOUT_STATE.with(|c| {
+    let info = FLYOUT_STATE.with(|c| {
         let mut borrow = c.borrow_mut();
-        if let Some(st) = borrow.as_mut() {
-            unsafe {
-                let mut wa: RECT = std::mem::zeroed();
-                SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut wa as *mut _ as *mut _, 0);
-                let margin = (12.0 * st.layout.s).round() as i32;
-                let x = wa.right - st.layout.w - margin;
-                let y = wa.bottom - st.layout.h - margin;
-                st.suppress_deactivate = true;
-                st.visible = true;
-                SetWindowPos(
-                    st.hwnd,
-                    HWND_TOPMOST,
-                    x,
-                    y,
-                    st.layout.w,
-                    st.layout.h,
-                    SWP_SHOWWINDOW,
-                );
-                SetForegroundWindow(st.hwnd);
-                InvalidateRect(st.hwnd, ptr::null(), 0);
+        borrow.as_mut().map(|st| {
+            st.suppress_deactivate = true;
+            st.visible = true;
+            (st.hwnd, st.layout.w, st.layout.h, st.layout.s)
+        })
+    });
+    if let Some((hwnd, w, h, s)) = info {
+        unsafe {
+            let mut wa: RECT = std::mem::zeroed();
+            SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut wa as *mut _ as *mut _, 0);
+            let margin = (12.0 * s).round() as i32;
+            let x = wa.right - w - margin;
+            let y = wa.bottom - h - margin;
+            SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h, SWP_SHOWWINDOW);
+            SetForegroundWindow(hwnd);
+            InvalidateRect(hwnd, ptr::null(), 0);
+        }
+        FLYOUT_STATE.with(|c| {
+            if let Some(st) = c.borrow_mut().as_mut() {
                 st.suppress_deactivate = false;
             }
-        }
-    });
+        });
+    }
 }
 
 pub fn hide_flyout() {
-    FLYOUT_STATE.with(|c| {
+    let hwnd_to_hide = FLYOUT_STATE.with(|c| {
         let mut borrow = c.borrow_mut();
         if let Some(st) = borrow.as_mut() {
             if st.visible {
@@ -318,30 +317,38 @@ pub fn hide_flyout() {
                 st.hover = HitPart::None;
                 st.pressed = HitPart::None;
                 st.last_hidden = Some(Instant::now());
-                unsafe {
-                    ShowWindow(st.hwnd, SW_HIDE);
-                }
+                return Some(st.hwnd);
             }
         }
+        None
     });
+    if let Some(hwnd) = hwnd_to_hide {
+        unsafe {
+            ShowWindow(hwnd, SW_HIDE);
+        }
+    }
 }
 
 pub fn set_flyout_refreshing(addr: &str, silent_if_connected: bool) {
-    FLYOUT_STATE.with(|c| {
+    let hwnd = FLYOUT_STATE.with(|c| {
         let mut borrow = c.borrow_mut();
         if let Some(st) = borrow.as_mut() {
             if silent_if_connected && st.connected {
-                return;
+                return None;
             }
             st.refreshing = true;
             st.status_text = format!("正在刷新 {}...", addr);
-            unsafe { InvalidateRect(st.hwnd, ptr::null(), 0); }
+            return Some(st.hwnd);
         }
+        None
     });
+    if let Some(h) = hwnd {
+        unsafe { InvalidateRect(h, ptr::null(), 0); }
+    }
 }
 
 pub fn update_flyout_status(ds: &DeviceStatus, addr: &str, takeover_active: bool) {
-    FLYOUT_STATE.with(|c| {
+    let hwnd = FLYOUT_STATE.with(|c| {
         let mut borrow = c.borrow_mut();
         if let Some(st) = borrow.as_mut() {
             st.refreshing = false;
@@ -364,13 +371,17 @@ pub fn update_flyout_status(ds: &DeviceStatus, addr: &str, takeover_active: bool
                     st.volume = Some(v);
                 }
             }
-            unsafe { InvalidateRect(st.hwnd, ptr::null(), 0); }
+            return Some(st.hwnd);
         }
+        None
     });
+    if let Some(h) = hwnd {
+        unsafe { InvalidateRect(h, ptr::null(), 0); }
+    }
 }
 
 pub fn set_flyout_optimistic_source(src: SignalSource, addr: &str, takeover_active: bool) {
-    FLYOUT_STATE.with(|c| {
+    let hwnd = FLYOUT_STATE.with(|c| {
         let mut borrow = c.borrow_mut();
         if let Some(st) = borrow.as_mut() {
             st.connected = true;
@@ -381,9 +392,13 @@ pub fn set_flyout_optimistic_source(src: SignalSource, addr: &str, takeover_acti
             } else {
                 format!("已连接 {} · 当前：{}", addr, src.label())
             };
-            unsafe { InvalidateRect(st.hwnd, ptr::null(), 0); }
+            return Some(st.hwnd);
         }
+        None
     });
+    if let Some(h) = hwnd {
+        unsafe { InvalidateRect(h, ptr::null(), 0); }
+    }
 }
 
 fn emit_action(act: FlyoutAction) {
@@ -643,20 +658,22 @@ unsafe extern "system" fn flyout_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
             TrackMouseEvent(&mut tme);
 
             let mut need_repaint = false;
+            let mut timer_to_set: Option<(usize, u32)> = None;
+            let mut use_hand = false;
             FLYOUT_STATE.with(|c| {
                 if let Some(st) = c.borrow_mut().as_mut() {
                     if st.dragging_bl {
                         let v = st.layout.slider_value_from_x(&st.layout.bl_slider, px);
                         if st.backlight != Some(v) {
                             st.backlight = Some(v);
-                            SetTimer(hwnd, TIMER_BL_DEBOUNCE, 160, None);
+                            timer_to_set = Some((TIMER_BL_DEBOUNCE, 160));
                             need_repaint = true;
                         }
                     } else if st.dragging_vol {
                         let v = st.layout.slider_value_from_x(&st.layout.vol_slider, px);
                         if st.volume != Some(v) {
                             st.volume = Some(v);
-                            SetTimer(hwnd, TIMER_VOL_DEBOUNCE, 140, None);
+                            timer_to_set = Some((TIMER_VOL_DEBOUNCE, 140));
                             need_repaint = true;
                         }
                     } else {
@@ -666,72 +683,86 @@ unsafe extern "system" fn flyout_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
                             need_repaint = true;
                         }
                     }
-                    let cursor = if st.hover != HitPart::None || st.dragging_bl || st.dragging_vol {
-                        IDC_HAND
-                    } else {
-                        IDC_ARROW
-                    };
-                    SetCursor(LoadCursorW(ptr::null_mut(), cursor));
+                    use_hand = st.hover != HitPart::None || st.dragging_bl || st.dragging_vol;
                 }
             });
+            if let Some((tid, ms)) = timer_to_set {
+                SetTimer(hwnd, tid, ms, None);
+            }
+            SetCursor(LoadCursorW(ptr::null_mut(), if use_hand { IDC_HAND } else { IDC_ARROW }));
             if need_repaint {
                 InvalidateRect(hwnd, ptr::null(), 0);
             }
             0
         }
         WM_MOUSELEAVE_MSG => {
-            FLYOUT_STATE.with(|c| {
+            let need_repaint = FLYOUT_STATE.with(|c| {
                 if let Some(st) = c.borrow_mut().as_mut() {
                     if st.hover != HitPart::None {
                         st.hover = HitPart::None;
-                        InvalidateRect(hwnd, ptr::null(), 0);
+                        return true;
                     }
                 }
+                false
             });
+            if need_repaint {
+                InvalidateRect(hwnd, ptr::null(), 0);
+            }
             0
         }
         WM_LBUTTONDOWN => {
             let px = (lp as i16) as f32;
             let py = ((lp >> 16) as i16) as f32;
+            let mut capture = false;
+            let mut timer_to_set: Option<(usize, u32)> = None;
             FLYOUT_STATE.with(|c| {
                 if let Some(st) = c.borrow_mut().as_mut() {
                     let hit = st.layout.hit_test(px, py);
                     st.pressed = hit;
                     if hit == HitPart::SliderBacklight {
                         st.dragging_bl = true;
-                        SetCapture(hwnd);
+                        capture = true;
                         let v = st.layout.slider_value_from_x(&st.layout.bl_slider, px);
                         st.backlight = Some(v);
-                        SetTimer(hwnd, TIMER_BL_DEBOUNCE, 160, None);
+                        timer_to_set = Some((TIMER_BL_DEBOUNCE, 160));
                     } else if hit == HitPart::SliderVolume {
                         st.dragging_vol = true;
-                        SetCapture(hwnd);
+                        capture = true;
                         let v = st.layout.slider_value_from_x(&st.layout.vol_slider, px);
                         st.volume = Some(v);
-                        SetTimer(hwnd, TIMER_VOL_DEBOUNCE, 140, None);
+                        timer_to_set = Some((TIMER_VOL_DEBOUNCE, 140));
                     }
-                    InvalidateRect(hwnd, ptr::null(), 0);
                 }
             });
+            if capture {
+                SetCapture(hwnd);
+            }
+            if let Some((tid, ms)) = timer_to_set {
+                SetTimer(hwnd, tid, ms, None);
+            }
+            InvalidateRect(hwnd, ptr::null(), 0);
             0
         }
         WM_LBUTTONUP => {
             let px = (lp as i16) as f32;
             let py = ((lp >> 16) as i16) as f32;
             let mut action: Option<FlyoutAction> = None;
+            let mut release_cap = false;
+            let mut kill_tid: Option<usize> = None;
+            let mut should_hide = false;
             FLYOUT_STATE.with(|c| {
                 if let Some(st) = c.borrow_mut().as_mut() {
                     if st.dragging_bl {
                         st.dragging_bl = false;
-                        ReleaseCapture();
-                        KillTimer(hwnd, TIMER_BL_DEBOUNCE);
+                        release_cap = true;
+                        kill_tid = Some(TIMER_BL_DEBOUNCE);
                         let v = st.layout.slider_value_from_x(&st.layout.bl_slider, px);
                         st.backlight = Some(v);
                         action = Some(FlyoutAction::SetBacklight(v));
                     } else if st.dragging_vol {
                         st.dragging_vol = false;
-                        ReleaseCapture();
-                        KillTimer(hwnd, TIMER_VOL_DEBOUNCE);
+                        release_cap = true;
+                        kill_tid = Some(TIMER_VOL_DEBOUNCE);
                         let v = st.layout.slider_value_from_x(&st.layout.vol_slider, px);
                         st.volume = Some(v);
                         action = Some(FlyoutAction::SetVolume(v));
@@ -741,12 +772,12 @@ unsafe extern "system" fn flyout_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
                             action = match hit {
                                 HitPart::Tile(src) => Some(FlyoutAction::SwitchSource(src)),
                                 HitPart::BtnSettings => {
-                                    hide_flyout();
+                                    should_hide = true;
                                     Some(FlyoutAction::OpenSettings)
                                 }
                                 HitPart::BtnRefresh => Some(FlyoutAction::Refresh),
                                 HitPart::BtnExit => {
-                                    hide_flyout();
+                                    should_hide = true;
                                     Some(FlyoutAction::Exit)
                                 }
                                 _ => None,
@@ -754,9 +785,18 @@ unsafe extern "system" fn flyout_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
                         }
                     }
                     st.pressed = HitPart::None;
-                    InvalidateRect(hwnd, ptr::null(), 0);
                 }
             });
+            if release_cap {
+                ReleaseCapture();
+            }
+            if let Some(tid) = kill_tid {
+                KillTimer(hwnd, tid);
+            }
+            InvalidateRect(hwnd, ptr::null(), 0);
+            if should_hide {
+                hide_flyout();
+            }
             if let Some(a) = action {
                 emit_action(a);
             }
