@@ -1,0 +1,18 @@
+# Runtime & local config (do not commit personal IP or large third-party binaries)
+config.ini
+MiTV-Switch.exe
+scrcpy/
+dist/
+*.log
+*.tmp
+
+# Rust build artifacts (for rust-rewrite branch/worktree)
+target/
+Cargo.lock
+
+# IDE / OS
+.vs/
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
