@@ -5,6 +5,8 @@ mod config;
 mod flyout;
 mod gdi;
 mod ime;
+mod keymap;
+mod keymap_ui;
 mod settings_ui;
 mod takeover;
 
@@ -21,8 +23,8 @@ use crate::gdi::{create_tray_icon, GdipGuard};
 use crate::ime::{find_english_hkl, restore_saved_ime, SavedImeState};
 use crate::settings_ui::show_settings_window;
 use crate::takeover::{
-    TakeoverSession, HK_RETURN_DP, WM_DP_RETURNED, WM_RESTORE_IME_RETRY, WM_SCRCPY_EXITED,
-    WM_SCRCPY_READY,
+    TakeoverSession, WM_DP_RETURNED, WM_RESTORE_IME_RETRY, WM_SCRCPY_EXITED, WM_SCRCPY_READY,
+    WM_TRIGGER_RETURN_DP,
 };
 use std::cell::RefCell;
 use std::ptr;
@@ -248,15 +250,22 @@ fn start_control_only() {
 }
 
 fn update_tray_takeover_visual(active: bool) {
-    let info = with_host(|h| (h.hwnd, if active { h.active_icon } else { h.idle_icon }));
-    if let Some((hwnd, icon)) = info {
+    let info = with_host(|h| {
+        let dp_key = h
+            .cfg
+            .lock()
+            .map(|c| c.keymap.return_dp_label())
+            .unwrap_or_else(|_| "Ctrl+Alt+D".to_string());
+        (h.hwnd, if active { h.active_icon } else { h.idle_icon }, dp_key)
+    });
+    if let Some((hwnd, icon, dp_key)) = info {
         let tip = if active {
-            "G Pro 27U 键鼠接管中 (Ctrl+Alt+D 切回电脑 DP)"
+            format!("G Pro 27U 键鼠接管中 ({} 切回电脑 DP)", dp_key)
         } else {
-            "G Pro 27U 信号源 / 背光 / 键鼠控制"
+            "G Pro 27U 信号源 / 背光 / 键鼠控制".to_string()
         };
         unsafe {
-            set_tray_icon_state(hwnd, icon, tip, false);
+            set_tray_icon_state(hwnd, icon, &tip, false);
             if active {
                 SetTimer(hwnd, TIMER_IME_GUARD, 150, None);
             } else {
@@ -285,8 +294,14 @@ fn open_settings() {
         return;
     };
     show_settings_window(cfg, dev, move || {
-        if let Ok(mut to) = takeover.lock() {
-            to.sync_wheel_flag();
+        let running = if let Ok(mut to) = takeover.lock() {
+            to.sync_config();
+            to.is_running()
+        } else {
+            false
+        };
+        if running {
+            update_tray_takeover_visual(true);
         }
     });
 }
@@ -378,17 +393,8 @@ unsafe extern "system" fn host_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             }
             0
         }
-        WM_HOTKEY => {
-            let id = wp as i32;
-            if id == HK_RETURN_DP {
-                handle_source_click(SignalSource::Dp);
-            } else {
-                with_host(|h| {
-                    if let Ok(to) = h.takeover.lock() {
-                        to.handle_hotkey(id);
-                    }
-                });
-            }
+        WM_TRIGGER_RETURN_DP => {
+            handle_source_click(SignalSource::Dp);
             0
         }
         WM_TIMER => {

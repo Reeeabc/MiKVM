@@ -1,5 +1,6 @@
 use crate::adb::DeviceController;
 use crate::config::{from_wide, is_autostart_enabled, set_autostart, to_wide, AppConfig};
+use crate::keymap_ui::show_keymap_window;
 use std::cell::RefCell;
 use std::ptr;
 use std::sync::{Arc, Mutex};
@@ -22,6 +23,8 @@ const ID_CHK_WHEEL: i32 = 205;
 const ID_CHK_AUTOSTART: i32 = 206;
 const ID_BTN_SAVE: i32 = 207;
 const ID_BTN_CANCEL: i32 = 208;
+const ID_BTN_KEYMAP: i32 = 209;
+const ID_LBL_GUIDE: i32 = 210;
 const WM_TEST_DONE: u32 = WM_APP + 50;
 
 const BM_GETCHECK: u32 = 0x00F0;
@@ -87,8 +90,8 @@ where
         let s = (dpi as f32 / 96.0).max(1.0);
         let sc = |v: f32| (v * s).round() as i32;
 
-        let cw = sc(430.0);
-        let ch = sc(372.0);
+        let cw = sc(452.0);
+        let ch = sc(386.0);
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
         let mut wr = RECT { left: 0, top: 0, right: cw, bottom: ch };
         AdjustWindowRectEx(&mut wr, style, 0, 0);
@@ -131,10 +134,24 @@ where
 
         let pad = sc(20.0);
         let inner = cw - pad * 2;
-        let (addr, auto_to, wheel_dp) = cfg
+        let (addr, auto_to, wheel_dp, guide) = cfg
             .lock()
-            .map(|c| (c.tv_address.clone(), c.auto_takeover_on_tv, c.wheel_as_dpad))
-            .unwrap_or_else(|_| ("192.168.1.200:5555".to_string(), true, true));
+            .map(|c| {
+                (
+                    c.tv_address.clone(),
+                    c.auto_takeover_on_tv,
+                    c.wheel_as_dpad,
+                    c.keymap.summary_text(),
+                )
+            })
+            .unwrap_or_else(|_| {
+                (
+                    "192.168.1.200:5555".to_string(),
+                    true,
+                    true,
+                    crate::keymap::KeyMap::default().summary_text(),
+                )
+            });
 
         let make_ctrl = |cls: &str, text: &str, ex: u32, st: u32, x: i32, y: i32, w: i32, h: i32, id: i32| -> HWND {
             let hw = CreateWindowExW(
@@ -168,13 +185,9 @@ where
         SendMessageW(chk_wh, BM_SETCHECK, if wheel_dp { BST_CHECKED } else { BST_UNCHECKED } as WPARAM, 0);
         SendMessageW(chk_as, BM_SETCHECK, if is_autostart_enabled() { BST_CHECKED } else { BST_UNCHECKED } as WPARAM, 0);
 
-        let guide = "接管电视期间遥控快捷键（回电脑自动注销，零误触）：\r\n\
-                     • 方向 / 确认：方向键 / Enter（滚轮 = 上下方向）\r\n\
-                     • 返回 / 主页 / 菜单：Esc / Home / F12（侧键 = 返回/主页）\r\n\
-                     • 音量 + / - / 静音：PgUp / PgDn / Ctrl+Alt+M\r\n\
-                     • 待机息屏 / 切回电脑 DP：Ctrl+Alt+P / Ctrl+Alt+D";
-        make_ctrl("STATIC", guide, 0, WS_BORDER, pad, sc(204.0), inner, sc(104.0), 0);
+        make_ctrl("STATIC", &guide, 0, WS_BORDER, pad, sc(204.0), inner, sc(112.0), ID_LBL_GUIDE);
 
+        make_ctrl("BUTTON", "自定义快捷键...", 0, WS_TABSTOP, pad, ch - sc(46.0), sc(126.0), sc(32.0), ID_BTN_KEYMAP);
         make_ctrl("BUTTON", "保存", 0, BS_DEFPUSHBUTTON | WS_TABSTOP, cw - pad - sc(168.0), ch - sc(46.0), sc(78.0), sc(32.0), ID_BTN_SAVE);
         make_ctrl("BUTTON", "取消", 0, WS_TABSTOP, cw - pad - sc(82.0), ch - sc(46.0), sc(82.0), sc(32.0), ID_BTN_CANCEL);
 
@@ -229,6 +242,37 @@ unsafe extern "system" fn settings_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp
                         std::thread::spawn(move || {
                             let ok = dev.test_connect(&addr);
                             PostMessageW(hwnd_raw as HWND, WM_TEST_DONE, if ok { 1 } else { 0 }, 0);
+                        });
+                    }
+                    0
+                }
+                ID_BTN_KEYMAP => {
+                    let cfg_opt = SETTINGS_STATE.with(|c| c.borrow().as_ref().map(|s| Arc::clone(&s.cfg)));
+                    if let Some(cfg_arc) = cfg_opt {
+                        let hwnd_raw = hwnd as usize;
+                        let cfg_for_cb = Arc::clone(&cfg_arc);
+                        show_keymap_window(cfg_arc, move || {
+                            if let Ok(c) = cfg_for_cb.lock() {
+                                let summary = c.keymap.summary_text();
+                                let h = hwnd_raw as HWND;
+                                unsafe {
+                                    if IsWindow(h) != 0 {
+                                        let lbl = GetDlgItem(h, ID_LBL_GUIDE);
+                                        if !lbl.is_null() {
+                                            SetWindowTextW(lbl, to_wide(&summary).as_ptr());
+                                        }
+                                    }
+                                }
+                            }
+                            let cb_ptr: *const dyn Fn() = SETTINGS_STATE.with(|c| {
+                                c.borrow()
+                                    .as_ref()
+                                    .and_then(|s| s.on_saved.as_deref().map(|f| f as *const _))
+                                    .unwrap_or(ptr::null::<fn()>() as *const _)
+                            });
+                            if !cb_ptr.is_null() {
+                                unsafe { (*cb_ptr)(); }
+                            }
                         });
                     }
                     0

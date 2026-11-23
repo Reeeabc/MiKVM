@@ -1,10 +1,11 @@
 use crate::adb::DeviceController;
 use crate::config::AppConfig;
 use crate::ime::{enforce_scrcpy_english_ime, restore_saved_ime, save_current_ime, SavedImeState};
+use crate::keymap::{KeyAction, KeyMap, MOD_ALT, MOD_CTRL, MOD_SHIFT};
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -13,27 +14,54 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-pub const HK_RETURN_DP: i32 = 9001;
-pub const HK_BACK: i32 = 9002;
-pub const HK_HOME: i32 = 9003;
-pub const HK_VOL_UP: i32 = 9005;
-pub const HK_VOL_DOWN: i32 = 9006;
-pub const HK_MUTE: i32 = 9007;
-pub const HK_POWER: i32 = 9008;
+const LLKHF_INJECTED_FLAG: u32 = 0x0000_0010;
 
 pub const WM_SCRCPY_READY: u32 = WM_APP + 10;
 pub const WM_SCRCPY_EXITED: u32 = WM_APP + 11;
 pub const WM_DP_RETURNED: u32 = WM_APP + 12;
 pub const WM_RESTORE_IME_RETRY: u32 = WM_APP + 13;
+pub const WM_TRIGGER_RETURN_DP: u32 = WM_APP + 14;
 
 static HOOK_ACTIVE: AtomicBool = AtomicBool::new(false);
 static WHEEL_AS_DPAD: AtomicBool = AtomicBool::new(true);
-static F12_DOWN: AtomicBool = AtomicBool::new(false);
 static LAST_WHEEL_MS: AtomicU32 = AtomicU32::new(0);
 static KEY_HOOK: AtomicIsize = AtomicIsize::new(0);
 static MOUSE_HOOK: AtomicIsize = AtomicIsize::new(0);
+static HOST_HWND_GLOBAL: AtomicUsize = AtomicUsize::new(0);
 static GLOBAL_DEV: Mutex<Option<Arc<DeviceController>>> = Mutex::new(None);
+static ACTIVE_KEYMAP: Mutex<Option<KeyMap>> = Mutex::new(None);
+
+// 256-bit lock-free bitset tracking swallowed VK codes so KEYUP is cleanly swallowed too
+static SWALLOWED_VKS: [AtomicU64; 4] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
+
+fn swallowed_test_and_set(vk: u16) -> bool {
+    if vk >= 256 {
+        return false;
+    }
+    let idx = (vk as usize) >> 6;
+    let mask = 1u64 << (vk & 63);
+    (SWALLOWED_VKS[idx].fetch_or(mask, Ordering::Relaxed) & mask) != 0
+}
+
+fn swallowed_clear(vk: u16) -> bool {
+    if vk >= 256 {
+        return false;
+    }
+    let idx = (vk as usize) >> 6;
+    let mask = 1u64 << (vk & 63);
+    (SWALLOWED_VKS[idx].fetch_and(!mask, Ordering::Relaxed) & mask) != 0
+}
+
+fn swallowed_reset_all() {
+    for slot in &SWALLOWED_VKS {
+        slot.store(0, Ordering::Relaxed);
+    }
+}
 
 pub struct TakeoverSession {
     scrcpy_dir: PathBuf,
@@ -45,7 +73,6 @@ pub struct TakeoverSession {
     child: Mutex<Option<Child>>,
     scrcpy_hwnd: AtomicIsize,
     watch_stop: Mutex<Option<Arc<AtomicBool>>>,
-    hotkeys_registered: bool,
     saved_ime: Option<SavedImeState>,
 }
 
@@ -58,8 +85,14 @@ impl TakeoverSession {
         english_hkl: HKL,
     ) -> Self {
         let scrcpy_path = scrcpy_dir.join("scrcpy.exe");
+        HOST_HWND_GLOBAL.store(host_hwnd as usize, Ordering::Release);
         if let Ok(mut g) = GLOBAL_DEV.lock() {
             *g = Some(Arc::clone(&dev));
+        }
+        if let Ok(c) = cfg.lock() {
+            if let Ok(mut km) = ACTIVE_KEYMAP.lock() {
+                *km = Some(c.keymap.clone());
+            }
         }
         Self {
             scrcpy_dir,
@@ -71,7 +104,6 @@ impl TakeoverSession {
             child: Mutex::new(None),
             scrcpy_hwnd: AtomicIsize::new(0),
             watch_stop: Mutex::new(None),
-            hotkeys_registered: false,
             saved_ime: None,
         }
     }
@@ -91,11 +123,18 @@ impl TakeoverSession {
         }
     }
 
-    pub fn sync_wheel_flag(&mut self) {
-        let enabled = self.cfg.lock().map(|c| c.wheel_as_dpad).unwrap_or(true);
-        WHEEL_AS_DPAD.store(enabled, Ordering::Relaxed);
+    pub fn sync_config(&mut self) {
+        let (wheel_on, keymap) = self
+            .cfg
+            .lock()
+            .map(|c| (c.wheel_as_dpad, c.keymap.clone()))
+            .unwrap_or_else(|_| (true, KeyMap::default()));
+        if let Ok(mut km) = ACTIVE_KEYMAP.lock() {
+            *km = Some(keymap);
+        }
+        WHEEL_AS_DPAD.store(wheel_on, Ordering::Relaxed);
         if self.is_running() {
-            if enabled {
+            if wheel_on {
                 self.install_mouse_hook();
             } else {
                 self.uninstall_mouse_hook();
@@ -166,14 +205,12 @@ impl TakeoverSession {
             *g = Some(child);
         }
 
-        // Notify UI thread to activate hooks & capture
         let host = self.host_hwnd;
         let found_raw = found_hwnd as usize;
         unsafe {
             PostMessageW(host as HWND, WM_SCRCPY_READY, found_raw as WPARAM, 0);
         }
 
-        // Background exit watcher
         let host_exit = self.host_hwnd;
         std::thread::spawn(move || {
             loop {
@@ -196,12 +233,11 @@ impl TakeoverSession {
 
     pub fn on_scrcpy_ready_ui(&mut self, hwnd: HWND) {
         self.save_ime_before_switch();
+        self.sync_config();
         HOOK_ACTIVE.store(true, Ordering::Release);
-        let wheel_on = self.cfg.lock().map(|c| c.wheel_as_dpad).unwrap_or(true);
-        WHEEL_AS_DPAD.store(wheel_on, Ordering::Relaxed);
+        let wheel_on = WHEEL_AS_DPAD.load(Ordering::Relaxed);
 
         self.dev.start_persistent_shell();
-        self.register_hotkeys();
         self.install_keyboard_hook();
         if wheel_on {
             self.install_mouse_hook();
@@ -268,7 +304,6 @@ impl TakeoverSession {
         self.stop_dp_return_watcher();
         self.uninstall_mouse_hook();
         self.uninstall_keyboard_hook();
-        self.unregister_hotkeys();
         self.dev.stop_persistent_shell();
 
         let h = self.scrcpy_hwnd.swap(0, Ordering::AcqRel) as HWND;
@@ -307,57 +342,11 @@ impl TakeoverSession {
         }
     }
 
-    pub fn handle_hotkey(&self, id: i32) -> bool {
-        if !HOOK_ACTIVE.load(Ordering::Relaxed) {
-            return false;
-        }
-        match id {
-            HK_BACK => self.dev.send_tv_key_fast(4),
-            HK_HOME => self.dev.send_tv_key_fast(3),
-            HK_VOL_UP => self.dev.send_tv_key_fast(24),
-            HK_VOL_DOWN => self.dev.send_tv_key_fast(25),
-            HK_MUTE => self.dev.send_tv_key_fast(164),
-            HK_POWER => self.dev.send_tv_key_fast(26),
-            _ => return false,
-        }
-        true
-    }
-
-    fn register_hotkeys(&mut self) {
-        if self.hotkeys_registered {
-            return;
-        }
-        unsafe {
-            let h = self.host_hwnd as HWND;
-            RegisterHotKey(h, HK_RETURN_DP, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, b'D' as u32);
-            RegisterHotKey(h, HK_BACK, MOD_NOREPEAT, VK_ESCAPE as u32);
-            RegisterHotKey(h, HK_HOME, MOD_NOREPEAT, VK_HOME as u32);
-            RegisterHotKey(h, HK_VOL_UP, 0, VK_PRIOR as u32);
-            RegisterHotKey(h, HK_VOL_DOWN, 0, VK_NEXT as u32);
-            RegisterHotKey(h, HK_MUTE, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, b'M' as u32);
-            RegisterHotKey(h, HK_POWER, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, b'P' as u32);
-        }
-        self.hotkeys_registered = true;
-    }
-
-    fn unregister_hotkeys(&mut self) {
-        if !self.hotkeys_registered {
-            return;
-        }
-        unsafe {
-            let h = self.host_hwnd as HWND;
-            for id in [HK_RETURN_DP, HK_BACK, HK_HOME, HK_VOL_UP, HK_VOL_DOWN, HK_MUTE, HK_POWER] {
-                UnregisterHotKey(h, id);
-            }
-        }
-        self.hotkeys_registered = false;
-    }
-
     fn install_keyboard_hook(&mut self) {
         if KEY_HOOK.load(Ordering::Relaxed) != 0 {
             return;
         }
-        F12_DOWN.store(false, Ordering::Relaxed);
+        swallowed_reset_all();
         unsafe {
             let hmod = GetModuleHandleW(std::ptr::null());
             let hk = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), hmod, 0);
@@ -366,7 +355,7 @@ impl TakeoverSession {
     }
 
     fn uninstall_keyboard_hook(&mut self) {
-        F12_DOWN.store(false, Ordering::Relaxed);
+        swallowed_reset_all();
         let hk = KEY_HOOK.swap(0, Ordering::AcqRel) as HHOOK;
         if !hk.is_null() {
             unsafe {
@@ -396,24 +385,72 @@ impl TakeoverSession {
     }
 }
 
+unsafe fn current_mod_mask() -> u8 {
+    let mut m = 0u8;
+    if (GetAsyncKeyState(VK_CONTROL as i32) as u16 & 0x8000) != 0 {
+        m |= MOD_CTRL;
+    }
+    if (GetAsyncKeyState(VK_MENU as i32) as u16 & 0x8000) != 0 {
+        m |= MOD_ALT;
+    }
+    if (GetAsyncKeyState(VK_SHIFT as i32) as u16 & 0x8000) != 0 {
+        m |= MOD_SHIFT;
+    }
+    m
+}
+
+fn dispatch_key_action(action: KeyAction) {
+    match action {
+        KeyAction::ReturnDp => {
+            let host = HOST_HWND_GLOBAL.load(Ordering::Acquire);
+            if host != 0 {
+                unsafe {
+                    PostMessageW(host as HWND, WM_TRIGGER_RETURN_DP, 0, 0);
+                }
+            }
+        }
+        KeyAction::Voice => {
+            if let Ok(g) = GLOBAL_DEV.try_lock() {
+                if let Some(ref dev) = *g {
+                    dev.trigger_voice_assistant();
+                }
+            }
+        }
+        other => {
+            if let Some(kc) = other.android_keycode() {
+                if let Ok(g) = GLOBAL_DEV.try_lock() {
+                    if let Some(ref dev) = *g {
+                        dev.send_tv_key_fast(kc);
+                    }
+                }
+            }
+        }
+    }
+}
+
 unsafe extern "system" fn keyboard_hook_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     if code >= 0 && HOOK_ACTIVE.load(Ordering::Relaxed) {
         let kb = &*(lp as *const KBDLLHOOKSTRUCT);
-        if kb.vkCode == VK_F12 as u32 {
+        if (kb.flags & LLKHF_INJECTED_FLAG) == 0 {
+            let vk = kb.vkCode as u16;
             let msg = wp as u32;
             if msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN {
-                if !F12_DOWN.swap(true, Ordering::Relaxed) {
-                    if let Ok(g) = GLOBAL_DEV.lock() {
-                        if let Some(ref dev) = *g {
-                            dev.send_tv_key_fast(82); // KEYCODE_MENU
-                        }
+                let mods = current_mod_mask();
+                let matched = ACTIVE_KEYMAP
+                    .try_lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().and_then(|km| km.match_event(mods, vk)));
+                if let Some(action) = matched {
+                    let was_down = swallowed_test_and_set(vk);
+                    if !was_down || action.is_repeatable() {
+                        dispatch_key_action(action);
                     }
+                    return 1;
                 }
-                return 1;
-            }
-            if msg == WM_KEYUP || msg == WM_SYSKEYUP {
-                F12_DOWN.store(false, Ordering::Relaxed);
-                return 1;
+            } else if msg == WM_KEYUP || msg == WM_SYSKEYUP {
+                if swallowed_clear(vk) {
+                    return 1;
+                }
             }
         }
     }
@@ -433,7 +470,7 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wp: WPARAM, lp: LPARAM) -> 
             let prev = LAST_WHEEL_MS.load(Ordering::Relaxed);
             if now.wrapping_sub(prev) >= 50 {
                 LAST_WHEEL_MS.store(now, Ordering::Relaxed);
-                if let Ok(g) = GLOBAL_DEV.lock() {
+                if let Ok(g) = GLOBAL_DEV.try_lock() {
                     if let Some(ref dev) = *g {
                         dev.send_tv_key_fast(if delta > 0 { 19 } else { 20 });
                     }

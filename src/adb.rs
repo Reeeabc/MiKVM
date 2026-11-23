@@ -299,7 +299,7 @@ impl DeviceController {
         }
     }
 
-    pub fn send_tv_key_fast(self: &Arc<Self>, keycode: i32) {
+    pub fn send_shell_cmd_fast(self: &Arc<Self>, cmd: String) {
         let dev = Arc::clone(self);
         std::thread::spawn(move || {
             let mut sent = false;
@@ -325,7 +325,7 @@ impl DeviceController {
                     }
                 }
                 if let Some(ps) = guard.as_mut() {
-                    let line = format!("cmd input keyevent {}\n", keycode);
+                    let line = format!("{}\n", cmd);
                     if ps.stdin.write_all(line.as_bytes()).is_ok() && ps.stdin.flush().is_ok() {
                         sent = true;
                     } else {
@@ -335,8 +335,19 @@ impl DeviceController {
                 }
             }
             if !sent {
-                let _ = dev.shell(&format!("cmd input keyevent {}", keycode), 2000);
+                let _ = dev.shell(&cmd, 2500);
             }
         });
+    }
+
+    pub fn send_tv_key_fast(self: &Arc<Self>, keycode: i32) {
+        self.send_shell_cmd_fast(format!("cmd input keyevent {}", keycode));
+    }
+
+    pub fn trigger_voice_assistant(self: &Arc<Self>) {
+        self.send_shell_cmd_fast(
+            "am start-service -n com.xiaomi.voicecontrol/.VoiceControlService -a com.xiaomi.mitv.voice.ONBOARD_MIC_START >/dev/null 2>&1"
+                .to_string(),
+        );
     }
 }

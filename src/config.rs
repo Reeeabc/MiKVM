@@ -1,3 +1,4 @@
+use crate::keymap::{KeyChord, KeyMap, ALL_ACTIONS};
 use std::fs;
 use std::path::{Path, PathBuf};
 use windows_sys::Win32::System::Registry::{
@@ -57,6 +58,7 @@ pub struct AppConfig {
     pub dp_input: i32,
     pub hdmi1_input: i32,
     pub hdmi2_input: i32,
+    pub keymap: KeyMap,
 }
 
 impl AppConfig {
@@ -69,6 +71,7 @@ impl AppConfig {
             dp_input: 29,
             hdmi1_input: 23,
             hdmi2_input: 24,
+            keymap: KeyMap::default(),
         };
         if !cfg.path.exists() {
             cfg.save();
@@ -105,6 +108,16 @@ impl AppConfig {
                         if let Ok(n) = v.parse::<i32>() {
                             cfg.hdmi2_input = n;
                         }
+                    } else {
+                        for act in ALL_ACTIONS {
+                            if k.eq_ignore_ascii_case(act.ini_key()) {
+                                let parsed = KeyChord::parse(v);
+                                if parsed.is_some() || !act.is_required() {
+                                    cfg.keymap.set(act, parsed);
+                                }
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -113,14 +126,15 @@ impl AppConfig {
     }
 
     pub fn save(&self) {
-        let content = format!(
+        let mut content = format!(
             "# G Pro 27U 融合切换工具配置 (Rust 原生版 / 键盘固定 SDK 模式)\r\n\
              TvAddress={}\r\n\
              AutoTakeoverOnTv={}\r\n\
              WheelAsDpad={}\r\n\
              DpInput={}\r\n\
              Hdmi1Input={}\r\n\
-             Hdmi2Input={}\r\n",
+             Hdmi2Input={}\r\n\
+             # 自定义遥控快捷键（留空表示禁用，仅接管电视期间生效）\r\n",
             self.tv_address,
             if self.auto_takeover_on_tv { "True" } else { "False" },
             if self.wheel_as_dpad { "True" } else { "False" },
@@ -128,6 +142,10 @@ impl AppConfig {
             self.hdmi1_input,
             self.hdmi2_input
         );
+        for act in ALL_ACTIONS {
+            let val = self.keymap.get(act).map(|c| c.format()).unwrap_or_default();
+            content.push_str(&format!("{}={}\r\n", act.ini_key(), val));
+        }
         let _ = fs::write(&self.path, content);
     }
 
