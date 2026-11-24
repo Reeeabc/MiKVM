@@ -19,7 +19,7 @@ MiKVM includes or interoperates with the following open-source projects:
 ## 3. scrcpy (Apache License 2.0)
 - Repository: https://github.com/Genymobile/scrcpy
 - License: Apache-2.0
-- Used at runtime (distributed separately / placed in `scrcpy/`) for video-less UHID mouse and SDK raw-key-events keyboard forwarding over wireless ADB.
+- Bundled in the `MiKVM-windows-x64-full.zip` release package (under `scrcpy/`, unmodified official Windows 64-bit build) for video-less UHID mouse and SDK raw-key-events keyboard forwarding over wireless ADB.
 
 ## 4. windows-sys (MIT / Apache-2.0)
 - Repository: https://github.com/microsoft/windows-rs

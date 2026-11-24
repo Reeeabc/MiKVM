@@ -23,30 +23,63 @@ jobs:
       - name: Build release binary
         run: cargo build --release
 
-      - name: Package release archive
+      - name: Fetch latest official scrcpy (Windows 64-bit)
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path dist/MiKVM/assets | Out-Null
-          Copy-Item target/release/MiKVM.exe dist/MiKVM/MiKVM.exe
-          Copy-Item assets/MiTVDaemon.jar, assets/MtkDirectTool.jar, assets/VolDirectTool.jar dist/MiKVM/assets/
-          Copy-Item config.example.ini, README.md, LICENSE, THIRD_PARTY_NOTICES.md dist/MiKVM/
-          Compress-Archive -Path dist/MiKVM/* -DestinationPath dist/MiKVM-windows-x64.zip -Force
-          $hash = (Get-FileHash dist/MiKVM-windows-x64.zip -Algorithm SHA256).Hash
-          "$hash  MiKVM-windows-x64.zip" | Out-File -Encoding ascii dist/SHA256SUMS.txt
+          $headers = @{ "User-Agent" = "MiKVM-Release-Builder" }
+          if ($env:GITHUB_TOKEN) { $headers["Authorization"] = "Bearer $($env:GITHUB_TOKEN)" }
+          $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/Genymobile/scrcpy/releases/latest" -Headers $headers
+          $asset = $rel.assets | Where-Object { $_.name -match '^scrcpy-win64-v.*\.zip$' } | Select-Object -First 1
+          if (-not $asset) { throw "Could not find scrcpy-win64 asset in latest release" }
+          Write-Host "Downloading $($asset.name) ($($rel.tag_name))..."
+          New-Item -ItemType Directory -Force -Path dist/scrcpy-dl | Out-Null
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile dist/scrcpy-dl/scrcpy.zip -UseBasicParsing
+          Expand-Archive -Path dist/scrcpy-dl/scrcpy.zip -DestinationPath dist/scrcpy-dl/extracted -Force
+          $inner = Get-ChildItem dist/scrcpy-dl/extracted -Directory | Select-Object -First 1
+          New-Item -ItemType Directory -Force -Path dist/scrcpy-bin | Out-Null
+          Copy-Item "$($inner.FullName)/*" dist/scrcpy-bin/ -Recurse -Force
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload build artifact
+      - name: Package full & lite release archives
+        shell: pwsh
+        run: |
+          # 1. Lite package (binary + assets + docs, ~130 KB)
+          New-Item -ItemType Directory -Force -Path dist/MiKVM-lite/assets | Out-Null
+          Copy-Item target/release/MiKVM.exe dist/MiKVM-lite/MiKVM.exe
+          Copy-Item assets/MiTVDaemon.jar, assets/MtkDirectTool.jar, assets/VolDirectTool.jar dist/MiKVM-lite/assets/
+          Copy-Item config.example.ini, README.md, LICENSE, THIRD_PARTY_NOTICES.md dist/MiKVM-lite/
+          Compress-Archive -Path dist/MiKVM-lite/* -DestinationPath dist/MiKVM-windows-x64-lite.zip -Force
+
+          # 2. Full plug-and-play package (includes official scrcpy + adb)
+          New-Item -ItemType Directory -Force -Path dist/MiKVM-full/scrcpy | Out-Null
+          Copy-Item dist/MiKVM-lite/* dist/MiKVM-full/ -Recurse -Force
+          Copy-Item dist/scrcpy-bin/* dist/MiKVM-full/scrcpy/ -Recurse -Force
+          Compress-Archive -Path dist/MiKVM-full/* -DestinationPath dist/MiKVM-windows-x64-full.zip -Force
+
+          # 3. SHA256 checksums
+          $hFull = (Get-FileHash dist/MiKVM-windows-x64-full.zip -Algorithm SHA256).Hash
+          $hLite = (Get-FileHash dist/MiKVM-windows-x64-lite.zip -Algorithm SHA256).Hash
+          @(
+            "$hFull  MiKVM-windows-x64-full.zip"
+            "$hLite  MiKVM-windows-x64-lite.zip"
+          ) | Out-File -Encoding ascii dist/SHA256SUMS.txt
+
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: MiKVM-windows-x64
           path: |
-            dist/MiKVM-windows-x64.zip
+            dist/MiKVM-windows-x64-full.zip
+            dist/MiKVM-windows-x64-lite.zip
             dist/SHA256SUMS.txt
 
-      - name: Create GitHub Release
+      - name: Update GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: |
-            dist/MiKVM-windows-x64.zip
+            dist/MiKVM-windows-x64-full.zip
+            dist/MiKVM-windows-x64-lite.zip
             dist/SHA256SUMS.txt

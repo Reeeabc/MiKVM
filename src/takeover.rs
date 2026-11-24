@@ -144,7 +144,10 @@ impl TakeoverSession {
 
     pub fn start_scrcpy_blocking(&self) -> Result<HWND, String> {
         if !self.scrcpy_path.exists() {
-            return Err(format!("未找到 {}", self.scrcpy_path.display()));
+            return Err(
+                "未找到 scrcpy.exe：请下载 full 完整版压缩包，或将官方 scrcpy 解压至同级 scrcpy/ 目录"
+                    .to_string(),
+            );
         }
         if self.is_running() {
             let h = self.scrcpy_hwnd.load(Ordering::Acquire) as HWND;

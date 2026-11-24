@@ -196,13 +196,21 @@ pub fn resolve_asset_dir(base: &Path) -> PathBuf {
 
 pub fn resolve_scrcpy_dir(base: &Path) -> PathBuf {
     let direct = base.join("scrcpy");
-    if direct.exists() {
+    if direct.join("scrcpy.exe").exists() || direct.join("adb.exe").exists() {
         return direct;
     }
     if let Some(p2) = base.parent().and_then(|p| p.parent()) {
         let candidate = p2.join("scrcpy");
-        if candidate.exists() {
+        if candidate.join("scrcpy.exe").exists() || candidate.join("adb.exe").exists() {
             return candidate;
+        }
+    }
+    // Fallback: auto-discover scrcpy.exe / adb.exe from system PATH (e.g. winget / scoop)
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            if dir.join("scrcpy.exe").exists() && dir.join("adb.exe").exists() {
+                return dir;
+            }
         }
     }
     direct

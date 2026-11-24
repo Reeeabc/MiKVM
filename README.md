@@ -60,15 +60,15 @@
 
 ### 2. 电脑端
 - **Windows 10 / 11**（纯原生 Win32 可执行文件，零运行库；对电脑键鼠类型、连接方式与配列无任何限制）。
-- 下载 [scrcpy Windows 64-bit](https://github.com/Genymobile/scrcpy/releases/latest) 解压到程序同级目录的 `scrcpy/` 文件夹（确保存在 `scrcpy\scrcpy.exe` 与 `scrcpy\adb.exe`）。
+- Releases 提供 **完整开箱版（`full.zip`，已内置官方 `scrcpy` 与 `adb`）** 和 **精简版（`lite.zip`，适合已装过 `scrcpy` 的用户，支持自动识别同级 `scrcpy/` 目录或系统环境变量 `PATH`）**。
 
 ---
 
 ## 快速使用
 
-1. 从 [Releases](https://github.com/Reeeabc/MiKVM/releases) 下载压缩包并解压（或自行从源码编译）。
-2. 将下载的 `scrcpy` Windows 64-bit 解压至同目录的 `scrcpy/` 文件夹。
-3. 双击运行 **`MiKVM.exe`**，左键点击右下角托盘图标打开浮窗 → 点击 **「ADB 设置...」** → 填入显示器无线 ADB 地址（如 `192.168.1.200:5555`）并保存即可使用。
+1. **新手推荐（开箱即用）**：从 [Releases](https://github.com/Reeeabc/MiKVM/releases) 下载 **`MiKVM-windows-x64-full.zip`**，解压到任意文件夹。
+   > 若下载精简版 `MiKVM-windows-x64-lite.zip` 或从源码编译，可将 [scrcpy Windows 64-bit](https://github.com/Genymobile/scrcpy/releases/latest) 解压到同级 `scrcpy/` 目录（或确保 `scrcpy.exe` / `adb.exe` 已在系统 `PATH` 中）。
+2. 双击运行 **`MiKVM.exe`**，左键点击右下角托盘图标打开浮窗 → 点击 **「ADB 设置...」** → 填入显示器无线 ADB 地址（如 `192.168.1.200:5555`）并保存即可使用。
 
 ---
 
