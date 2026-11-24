@@ -19,7 +19,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-const KEYMAP_CLASS: &str = "MiTVSwitchKeymapWnd";
+const KEYMAP_CLASS: &str = "MiKVMKeymapWnd";
 const ID_BTN_PRESET_75: i32 = 301;
 const ID_BTN_PRESET_60: i32 = 302;
 const ID_BTN_RESET: i32 = 303;
@@ -160,7 +160,7 @@ where
         let hwnd = CreateWindowExW(
             WS_EX_TOPMOST,
             cls_w.as_ptr(),
-            to_wide("自定义遥控快捷键 — G Pro 27U").as_ptr(),
+            to_wide("自定义遥控快捷键 — MiKVM").as_ptr(),
             style,
             (sw - ww) / 2,
             (sh - wh) / 2,

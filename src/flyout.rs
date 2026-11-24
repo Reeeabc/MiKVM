@@ -22,7 +22,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-const FLYOUT_CLASS: &str = "MiTVSwitchFluentFlyout";
+const FLYOUT_CLASS: &str = "MiKVMFluentFlyout";
 const SLIDER_THROTTLE_MS: u128 = 35;
 const DWMWCP_ROUND: i32 = 2;
 
@@ -224,7 +224,7 @@ where
         let hwnd = CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
             cls_w.as_ptr(),
-            to_wide("MiTV-Switch").as_ptr(),
+            to_wide("MiKVM").as_ptr(),
             WS_POPUP,
             0,
             0,

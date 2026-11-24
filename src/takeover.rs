@@ -165,7 +165,7 @@ impl TakeoverSession {
                 "--window-borderless",
                 "--window-width=120",
                 "--window-height=120",
-                "--window-title=MiTV-Switch-Capture",
+                "--window-title=MiKVM-Capture",
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())

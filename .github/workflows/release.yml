@@ -1,0 +1,52 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Package release archive
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/MiKVM/assets | Out-Null
+          Copy-Item target/release/MiKVM.exe dist/MiKVM/MiKVM.exe
+          Copy-Item assets/MiTVDaemon.jar, assets/MtkDirectTool.jar, assets/VolDirectTool.jar dist/MiKVM/assets/
+          Copy-Item config.example.ini, README.md, LICENSE, THIRD_PARTY_NOTICES.md dist/MiKVM/
+          Compress-Archive -Path dist/MiKVM/* -DestinationPath dist/MiKVM-windows-x64.zip -Force
+          $hash = (Get-FileHash dist/MiKVM-windows-x64.zip -Algorithm SHA256).Hash
+          "$hash  MiKVM-windows-x64.zip" | Out-File -Encoding ascii dist/SHA256SUMS.txt
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MiKVM-windows-x64
+          path: |
+            dist/MiKVM-windows-x64.zip
+            dist/SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/MiKVM-windows-x64.zip
+            dist/SHA256SUMS.txt

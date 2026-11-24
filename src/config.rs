@@ -7,7 +7,8 @@ use windows_sys::Win32::System::Registry::{
 };
 
 const RUN_REG_PATH: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-const RUN_REG_NAME: &str = "MiTVSwitch";
+const RUN_REG_NAME: &str = "MiKVM";
+const LEGACY_RUN_REG_NAME: &str = "MiTVSwitch";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignalSource {
@@ -127,7 +128,7 @@ impl AppConfig {
 
     pub fn save(&self) {
         let mut content = format!(
-            "# G Pro 27U 融合切换工具配置 (Rust 原生版 / 键盘固定 SDK 模式)\r\n\
+            "# MiKVM 配置文件 (Redmi G Pro 27U / MiTV 软件 KVM 与切源工具)\r\n\
              TvAddress={}\r\n\
              AutoTakeoverOnTv={}\r\n\
              WheelAsDpad={}\r\n\
@@ -237,6 +238,7 @@ pub fn set_autostart(enable: bool) {
         if RegOpenKeyExW(HKEY_CURRENT_USER, path_w.as_ptr(), 0, KEY_SET_VALUE, &mut hkey) != 0 {
             return;
         }
+        let _ = RegDeleteValueW(hkey, to_wide(LEGACY_RUN_REG_NAME).as_ptr());
         if enable {
             if let Ok(exe) = std::env::current_exe() {
                 let val = format!("\"{}\"", exe.display());

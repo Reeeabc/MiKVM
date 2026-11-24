@@ -1,15 +1,16 @@
 [package]
-name = "mitv-switch"
+name = "mikvm"
 version = "2.0.0"
 edition = "2021"
-description = "Ultra-lightweight Windows 11 tray switcher & keyboard/mouse takeover tool for Redmi G Pro 27U"
+description = "Ultra-lightweight Rust Win11 tray switcher & software KVM for Redmi G Pro 27U / Xiaomi Smart Monitors"
 license = "MIT"
+repository = "https://github.com/Reeeabc/MiKVM"
 
 [[bin]]
-name = "MiTV-Switch"
+name = "MiKVM"
 path = "src/main.rs"
 
-[dependencies]
+[target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_LibraryLoader",

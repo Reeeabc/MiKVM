@@ -1,5 +1,6 @@
 # Runtime & local config (do not commit personal IP or large third-party binaries)
 config.ini
+MiKVM.exe
 MiTV-Switch.exe
 scrcpy/
 dist/

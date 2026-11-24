@@ -14,7 +14,7 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::{BST_CHECKED, BST_UNCHECKED};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-const SETTINGS_CLASS: &str = "MiTVSwitchSettingsWnd";
+const SETTINGS_CLASS: &str = "MiKVMSettingsWnd";
 const ID_EDIT_ADDR: i32 = 201;
 const ID_BTN_TEST: i32 = 202;
 const ID_LBL_STATUS: i32 = 203;
@@ -103,7 +103,7 @@ where
         let hwnd = CreateWindowExW(
             WS_EX_TOPMOST,
             cls_w.as_ptr(),
-            to_wide("ADB 与键鼠设置 — G Pro 27U").as_ptr(),
+            to_wide("ADB 与键鼠设置 — MiKVM").as_ptr(),
             style,
             (sw - ww) / 2,
             (sh - wh) / 2,

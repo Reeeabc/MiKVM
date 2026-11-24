@@ -53,7 +53,7 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-const HOST_CLASS: &str = "MiTVSwitchTrayHost";
+const HOST_CLASS: &str = "MiKVMTrayHost";
 const TRAY_UID: u32 = 1;
 const WM_TRAY_ICON: u32 = WM_APP + 1;
 const WM_STATUS_UPDATED: u32 = WM_APP + 2;
@@ -260,9 +260,9 @@ fn update_tray_takeover_visual(active: bool) {
     });
     if let Some((hwnd, icon, dp_key)) = info {
         let tip = if active {
-            format!("G Pro 27U 键鼠接管中 ({} 切回电脑 DP)", dp_key)
+            format!("MiKVM 键鼠接管中 ({} 切回电脑 DP)", dp_key)
         } else {
-            "G Pro 27U 信号源 / 背光 / 键鼠控制".to_string()
+            "MiKVM — 信号源 / 背光 / 键鼠控制".to_string()
         };
         unsafe {
             set_tray_icon_state(hwnd, icon, &tip, false);
@@ -471,7 +471,7 @@ unsafe extern "system" fn host_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
         WM_SHOW_BALLOON => {
             if lp != 0 {
                 let text = Box::from_raw(lp as *mut String);
-                show_tray_balloon(hwnd, "MiTV-Switch", &text);
+                show_tray_balloon(hwnd, "MiKVM", &text);
             }
             0
         }
@@ -481,11 +481,10 @@ unsafe extern "system" fn host_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
 
 fn main() {
     unsafe {
-        // Single-instance check (shared with C# edition so they don't duplicate)
         let mutex = CreateMutexW(
             ptr::null(),
             1,
-            to_wide("Local\\MiTVSwitch_GPro27U_SingleInstance").as_ptr(),
+            to_wide("Local\\MiKVM_SingleInstance").as_ptr(),
         );
         if mutex.is_null() || GetLastError() == ERROR_ALREADY_EXISTS {
             return;
@@ -529,7 +528,7 @@ fn main() {
         CreateWindowExW(
             0,
             cls_w.as_ptr(),
-            to_wide("MiTV-Switch Host").as_ptr(),
+            to_wide("MiKVM Host").as_ptr(),
             0,
             0,
             0,
@@ -589,7 +588,7 @@ fn main() {
     });
 
     unsafe {
-        set_tray_icon_state(host_hwnd, idle_icon, "G Pro 27U 信号源 / 背光 / 键鼠控制", true);
+        set_tray_icon_state(host_hwnd, idle_icon, "MiKVM — 信号源 / 背光 / 键鼠控制", true);
 
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, ptr::null_mut(), 0, 0) > 0 {
