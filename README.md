@@ -8,6 +8,25 @@
 
 无需遥控器、无需硬件 USB 切换器、不挑电脑键鼠——在电脑右下角即可一键切换 **电视系统 / 电脑 DP / HDMI 1 / HDMI 2**、**6–10 ms 毫秒级调节真实硬件背光与音量**，并在切入电视系统时**自动隐形接管电脑的任意鼠标和键盘**；切回电脑时瞬间释放并自动还原你的中文输入法。
 
+## 界面预览
+
+<table>
+  <tr>
+    <td align="center" width="33%">
+      <img src="docs/screenshots/flyout.jpg" alt="Windows 11 原生托盘浮窗" /><br />
+      <sub><b>Win11 原生圆角托盘浮窗</b></sub>
+    </td>
+    <td align="center" width="33%">
+      <img src="docs/screenshots/settings.png" alt="ADB 与键鼠设置" /><br />
+      <sub><b>ADB 连接与键鼠接管设置</b></sub>
+    </td>
+    <td align="center" width="33%">
+      <img src="docs/screenshots/keymap.jpg" alt="自定义遥控快捷键" /><br />
+      <sub><b>点击录制自定义遥控快捷键</b></sub>
+    </td>
+  </tr>
+</table>
+
 ---
 
 ## 核心特性
