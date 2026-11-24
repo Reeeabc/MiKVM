@@ -107,7 +107,7 @@ public class MiTVDaemon {
                     try {
                         int v = Math.max(0, Math.min(100, Integer.parseInt(trimmed.substring(2).trim())));
                         if (audioMgr != null && setVol != null) {
-                            setVol.invoke(audioMgr, 3, v, 0);
+                            setVol.invoke(audioMgr, 3, v, 1); // AudioManager.FLAG_SHOW_UI = 1
                             System.out.println("OK V " + v);
                         } else {
                             System.out.println("ERR NO_AUDIO");

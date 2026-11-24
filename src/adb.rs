@@ -256,10 +256,14 @@ impl DeviceController {
         if self.jars_verified.lock().map(|g| *g).unwrap_or(false) {
             return;
         }
-        let (_, out, _) = self.shell(
-            "test -f /data/local/tmp/MiTVDaemon.jar && test -f /data/local/tmp/MtkDirectTool.jar && test -f /data/local/tmp/VolDirectTool.jar && echo OK",
-            2500,
+        let local_daemon_len = std::fs::metadata(self.assets_dir.join("MiTVDaemon.jar"))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let check_cmd = format!(
+            "test -f /data/local/tmp/MiTVDaemon.jar && test -f /data/local/tmp/MtkDirectTool.jar && test -f /data/local/tmp/VolDirectTool.jar && [ \"$(wc -c < /data/local/tmp/MiTVDaemon.jar)\" -eq {} ] && echo OK",
+            local_daemon_len
         );
+        let (_, out, _) = self.shell(&check_cmd, 2500);
         if out.trim() == "OK" {
             if let Ok(mut g) = self.jars_verified.lock() {
                 *g = true;
@@ -512,7 +516,7 @@ impl DeviceController {
             }
         }
         // Fast rootless Binder fallback (~68ms, works without Root!)
-        let cmd = format!("cmd media_session volume --stream 3 --set {} >/dev/null 2>&1", v);
+        let cmd = format!("cmd media_session volume --stream 3 --set {} --show >/dev/null 2>&1", v);
         let (code, _, _) = self.shell(&cmd, 2000);
         if code != 0 && self.ensure_connected() {
             let _ = self.shell(&cmd, 2500);
