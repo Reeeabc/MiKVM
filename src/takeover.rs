@@ -238,6 +238,7 @@ impl TakeoverSession {
         let wheel_on = WHEEL_AS_DPAD.load(Ordering::Relaxed);
 
         self.dev.start_persistent_shell();
+        self.dev.set_keep_warm(true);
         self.install_keyboard_hook();
         if wheel_on {
             self.install_mouse_hook();
@@ -305,6 +306,7 @@ impl TakeoverSession {
         self.uninstall_mouse_hook();
         self.uninstall_keyboard_hook();
         self.dev.stop_persistent_shell();
+        self.dev.set_keep_warm(false);
 
         let h = self.scrcpy_hwnd.swap(0, Ordering::AcqRel) as HWND;
         if !h.is_null() {
@@ -413,6 +415,20 @@ fn dispatch_key_action(action: KeyAction) {
             if let Ok(g) = GLOBAL_DEV.try_lock() {
                 if let Some(ref dev) = *g {
                     dev.trigger_voice_assistant();
+                }
+            }
+        }
+        KeyAction::BrightnessUp => {
+            if let Ok(g) = GLOBAL_DEV.try_lock() {
+                if let Some(ref dev) = *g {
+                    dev.queue_step_backlight(5);
+                }
+            }
+        }
+        KeyAction::BrightnessDown => {
+            if let Ok(g) = GLOBAL_DEV.try_lock() {
+                if let Some(ref dev) = *g {
+                    dev.queue_step_backlight(-5);
                 }
             }
         }

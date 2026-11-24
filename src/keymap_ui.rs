@@ -148,7 +148,7 @@ where
         let sc = |v: f32| (v * s).round() as i32;
 
         let cw = sc(476.0);
-        let ch = sc(512.0);
+        let ch = sc(545.0);
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
         let mut wr = RECT { left: 0, top: 0, right: cw, bottom: ch };
         AdjustWindowRectEx(&mut wr, style, 0, 0);
@@ -217,8 +217,8 @@ where
         let inner = cw - pad * 2;
 
         // Top presets row
-        make_ctrl("BUTTON", "75% 默认方案", 0, WS_TABSTOP, pad, sc(14.0), sc(116.0), sc(28.0), ID_BTN_PRESET_75);
-        make_ctrl("BUTTON", "60% 紧凑方案", 0, WS_TABSTOP, pad + sc(124.0), sc(14.0), sc(116.0), sc(28.0), ID_BTN_PRESET_60);
+        make_ctrl("BUTTON", "预设 1", 0, WS_TABSTOP, pad, sc(14.0), sc(92.0), sc(28.0), ID_BTN_PRESET_75);
+        make_ctrl("BUTTON", "预设 2", 0, WS_TABSTOP, pad + sc(100.0), sc(14.0), sc(92.0), sc(28.0), ID_BTN_PRESET_60);
         make_ctrl("BUTTON", "恢复默认", 0, WS_TABSTOP, cw - pad - sc(86.0), sc(14.0), sc(86.0), sc(28.0), ID_BTN_RESET);
 
         make_ctrl(
@@ -275,7 +275,7 @@ where
             0,
             0,
             pad,
-            sc(416.0),
+            sc(449.0),
             inner,
             sc(34.0),
             ID_LBL_MSG,
@@ -459,14 +459,14 @@ unsafe extern "system" fn keymap_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
                         let mut b = c.borrow_mut();
                         if let Some(st) = b.as_mut() {
                             st.recording = None;
-                            st.draft = KeyMap::preset_default_75();
+                            st.draft = KeyMap::preset_1();
                             return Some(st.draft.clone());
                         }
                         None
                     });
                     if let Some(d) = draft {
                         refresh_key_buttons(hwnd, &d, None);
-                        set_msg(hwnd, "已切换为「75% 默认方案」（点「保存」生效）");
+                        set_msg(hwnd, "已切换为「预设 1」（点「保存」生效）");
                     }
                     0
                 }
@@ -476,14 +476,14 @@ unsafe extern "system" fn keymap_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
                         let mut b = c.borrow_mut();
                         if let Some(st) = b.as_mut() {
                             st.recording = None;
-                            st.draft = KeyMap::preset_compact_60();
+                            st.draft = KeyMap::preset_2();
                             return Some(st.draft.clone());
                         }
                         None
                     });
                     if let Some(d) = draft {
                         refresh_key_buttons(hwnd, &d, None);
-                        set_msg(hwnd, "已切换为「60% 紧凑方案」（Alt 组合键，点「保存」生效）");
+                        set_msg(hwnd, "已切换为「预设 2」（Alt 组合键，点「保存」生效）");
                     }
                     0
                 }
@@ -496,7 +496,7 @@ unsafe extern "system" fn keymap_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
                             if st.draft.get(KeyAction::ReturnDp).is_none() {
                                 st.draft.set(
                                     KeyAction::ReturnDp,
-                                    KeyMap::preset_default_75().get(KeyAction::ReturnDp),
+                                    KeyMap::preset_1().get(KeyAction::ReturnDp),
                                 );
                             }
                             if let Ok(mut cfg) = st.cfg.lock() {

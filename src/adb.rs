@@ -1,16 +1,68 @@
 use crate::config::{AppConfig, DeviceStatus, SignalSource};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+const DAEMON_IDLE_SECS: u64 = 25;
 
 struct PersistentShell {
     child: Child,
     stdin: ChildStdin,
+}
+
+struct DaemonProc {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl DaemonProc {
+    fn send_cmd(&mut self, cmd: &str) -> Option<String> {
+        if self.stdin.write_all(cmd.as_bytes()).is_err()
+            || self.stdin.write_all(b"\n").is_err()
+            || self.stdin.flush().is_err()
+        {
+            return None;
+        }
+        let mut line = String::new();
+        match self.stdout.read_line(&mut line) {
+            Ok(n) if n > 0 => Some(line.trim().to_string()),
+            _ => None,
+        }
+    }
+
+    fn shutdown(mut self) {
+        let _ = self.stdin.write_all(b"Q\n");
+        let _ = self.stdin.flush();
+        drop(self.stdin);
+        let deadline = Instant::now() + Duration::from_millis(350);
+        loop {
+            if !matches!(self.child.try_wait(), Ok(None)) {
+                break;
+            }
+            if Instant::now() >= deadline {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(15));
+        }
+    }
+}
+
+#[derive(Default)]
+struct SliderQueue {
+    backlight: Option<i32>,
+    volume: Option<i32>,
+    sync_backlight: Option<i32>,
+    warm: bool,
+    step_bl_delta: i32,
+    stop_daemon: bool,
 }
 
 pub struct DeviceController {
@@ -18,7 +70,14 @@ pub struct DeviceController {
     assets_dir: PathBuf,
     cfg: Arc<Mutex<AppConfig>>,
     shell: Mutex<Option<PersistentShell>>,
+    daemon: Mutex<Option<DaemonProc>>,
     jars_verified: Mutex<bool>,
+    keep_warm: AtomicBool,
+    cached_bl: AtomicI32,
+    cached_vol: AtomicI32,
+    queue: Mutex<SliderQueue>,
+    cv: Condvar,
+    worker_started: AtomicBool,
 }
 
 impl DeviceController {
@@ -28,14 +87,87 @@ impl DeviceController {
             assets_dir,
             cfg,
             shell: Mutex::new(None),
+            daemon: Mutex::new(None),
             jars_verified: Mutex::new(false),
+            keep_warm: AtomicBool::new(false),
+            cached_bl: AtomicI32::new(-1),
+            cached_vol: AtomicI32::new(-1),
+            queue: Mutex::new(SliderQueue::default()),
+            cv: Condvar::new(),
+            worker_started: AtomicBool::new(false),
         }
+    }
+
+    fn ensure_worker(self: &Arc<Self>) {
+        if self.worker_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let dev = Arc::clone(self);
+        std::thread::spawn(move || dev.slider_worker_loop());
     }
 
     pub fn reset_jar_cache(&self) {
         if let Ok(mut g) = self.jars_verified.lock() {
             *g = false;
         }
+        self.stop_daemon_now();
+    }
+
+    pub fn set_keep_warm(self: &Arc<Self>, warm: bool) {
+        self.keep_warm.store(warm, Ordering::Release);
+        if warm {
+            self.ensure_worker();
+            if let Ok(mut q) = self.queue.lock() {
+                q.warm = true;
+            }
+            self.cv.notify_one();
+        } else {
+            self.cv.notify_one();
+        }
+    }
+
+    pub fn stop_daemon_now(&self) {
+        if let Ok(mut q) = self.queue.lock() {
+            q.stop_daemon = true;
+            q.warm = false;
+        }
+        self.cv.notify_one();
+        if let Ok(mut g) = self.daemon.lock() {
+            if let Some(d) = g.take() {
+                d.shutdown();
+            }
+        }
+    }
+
+    pub fn queue_backlight(self: &Arc<Self>, val: i32, commit_sync: bool) {
+        let v = val.clamp(0, 100);
+        self.cached_bl.store(v, Ordering::Relaxed);
+        self.ensure_worker();
+        if let Ok(mut q) = self.queue.lock() {
+            q.backlight = Some(v);
+            if commit_sync {
+                q.sync_backlight = Some(v);
+            }
+        }
+        self.cv.notify_one();
+    }
+
+    pub fn queue_volume(self: &Arc<Self>, val: i32) {
+        let v = val.clamp(0, 100);
+        self.cached_vol.store(v, Ordering::Relaxed);
+        self.ensure_worker();
+        if let Ok(mut q) = self.queue.lock() {
+            q.volume = Some(v);
+        }
+        self.cv.notify_one();
+    }
+
+    pub fn queue_step_backlight(self: &Arc<Self>, delta: i32) {
+        self.ensure_worker();
+        if let Ok(mut q) = self.queue.lock() {
+            q.step_bl_delta += delta;
+        }
+        self.cv.notify_one();
     }
 
     fn tv_address(&self) -> String {
@@ -85,7 +217,7 @@ impl DeviceController {
                         let _ = child.wait();
                         break -1;
                     }
-                    std::thread::sleep(Duration::from_millis(15));
+                    std::thread::sleep(Duration::from_millis(12));
                 }
                 Err(_) => break -1,
             }
@@ -102,11 +234,15 @@ impl DeviceController {
     }
 
     pub fn test_connect(&self, addr: &str) -> bool {
+        let (_, st, _) = self.run_adb(&["-s", addr, "get-state"], 1500);
+        if st.trim() == "device" {
+            return true;
+        }
         let (_, out, err) = self.run_adb(&["connect", addr], 3500);
         let combined = format!("{} {}", out, err).to_ascii_lowercase();
         if combined.contains("connected to") || combined.contains("already connected") {
-            let (_, st, _) = self.run_adb(&["-s", addr, "get-state"], 2500);
-            return st.trim() == "device";
+            let (_, st2, _) = self.run_adb(&["-s", addr, "get-state"], 2500);
+            return st2.trim() == "device";
         }
         false
     }
@@ -121,7 +257,7 @@ impl DeviceController {
             return;
         }
         let (_, out, _) = self.shell(
-            "test -f /data/local/tmp/MtkDirectTool.jar && test -f /data/local/tmp/VolDirectTool.jar && echo OK",
+            "test -f /data/local/tmp/MiTVDaemon.jar && test -f /data/local/tmp/MtkDirectTool.jar && test -f /data/local/tmp/VolDirectTool.jar && echo OK",
             2500,
         );
         if out.trim() == "OK" {
@@ -131,25 +267,265 @@ impl DeviceController {
             return;
         }
         let addr = self.tv_address();
-        let mtk = self.assets_dir.join("MtkDirectTool.jar");
-        let vol = self.assets_dir.join("VolDirectTool.jar");
-        if mtk.exists() {
-            if let Some(s) = mtk.to_str() {
-                let _ = self.run_adb(&["-s", &addr, "push", s, "/data/local/tmp/MtkDirectTool.jar"], 6000);
-            }
-        }
-        if vol.exists() {
-            if let Some(s) = vol.to_str() {
-                let _ = self.run_adb(&["-s", &addr, "push", s, "/data/local/tmp/VolDirectTool.jar"], 6000);
+        for name in ["MiTVDaemon.jar", "MtkDirectTool.jar", "VolDirectTool.jar"] {
+            let p = self.assets_dir.join(name);
+            if p.exists() {
+                if let Some(s) = p.to_str() {
+                    let remote = format!("/data/local/tmp/{}", name);
+                    let _ = self.run_adb(&["-s", &addr, "push", s, &remote], 6000);
+                }
             }
         }
         let _ = self.shell(
-            "chmod 644 /data/local/tmp/MtkDirectTool.jar /data/local/tmp/VolDirectTool.jar 2>/dev/null",
+            "chmod 644 /data/local/tmp/MiTVDaemon.jar /data/local/tmp/MtkDirectTool.jar /data/local/tmp/VolDirectTool.jar 2>/dev/null",
             2500,
         );
         if let Ok(mut g) = self.jars_verified.lock() {
             *g = true;
         }
+    }
+
+    fn start_daemon_locked(&self, guard: &mut Option<DaemonProc>) -> bool {
+        if let Some(ref mut d) = *guard {
+            if matches!(d.child.try_wait(), Ok(None)) {
+                return true;
+            }
+        }
+        *guard = None;
+        if !self.adb_path.exists() {
+            return false;
+        }
+        self.ensure_jars_deployed();
+        let addr = self.tv_address();
+        let mut child = match Command::new(&self.adb_path)
+            .args([
+                "-s",
+                &addr,
+                "shell",
+                "su 1000 -c 'CLASSPATH=/data/local/tmp/MiTVDaemon.jar /system/bin/app_process /data/local/tmp MiTVDaemon'",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+
+        let Some(stdin) = child.stdin.take() else {
+            let _ = child.kill();
+            return false;
+        };
+        let Some(stdout_raw) = child.stdout.take() else {
+            let _ = child.kill();
+            return false;
+        };
+        let mut stdout = BufReader::new(stdout_raw);
+        let mut ready_line = String::new();
+        if stdout.read_line(&mut ready_line).unwrap_or(0) > 0 && ready_line.trim() == "READY" {
+            *guard = Some(DaemonProc { child, stdin, stdout });
+            true
+        } else {
+            let _ = child.kill();
+            let _ = child.wait();
+            false
+        }
+    }
+
+    fn daemon_cmd(&self, cmd: &str) -> Option<String> {
+        let mut guard = self.daemon.lock().ok()?;
+        if !self.start_daemon_locked(&mut guard) {
+            return None;
+        }
+        if let Some(ref mut d) = *guard {
+            if let Some(resp) = d.send_cmd(cmd) {
+                return Some(resp);
+            }
+        }
+        // Retry once after restarting dead pipe
+        if let Some(d) = guard.take() {
+            d.shutdown();
+        }
+        if self.start_daemon_locked(&mut guard) {
+            if let Some(ref mut d) = *guard {
+                return d.send_cmd(cmd);
+            }
+        }
+        None
+    }
+
+    fn slider_worker_loop(&self) {
+        let mut last_activity = Instant::now();
+        let mut pending_bl_sync: Option<(i32, Instant)> = None;
+
+        loop {
+            let task = {
+                let mut q = match self.queue.lock() {
+                    Ok(g) => g,
+                    Err(_) => return,
+                };
+                let has_work = q.backlight.is_some()
+                    || q.volume.is_some()
+                    || q.sync_backlight.is_some()
+                    || q.step_bl_delta != 0
+                    || q.warm
+                    || q.stop_daemon;
+
+                if !has_work {
+                    let daemon_alive = self
+                        .daemon
+                        .lock()
+                        .map(|g| g.is_some())
+                        .unwrap_or(false);
+
+                    let wait_dur = if let Some((_, at)) = pending_bl_sync {
+                        let now = Instant::now();
+                        if now >= at {
+                            Duration::from_millis(1)
+                        } else {
+                            at - now
+                        }
+                    } else if daemon_alive && !self.keep_warm.load(Ordering::Acquire) {
+                        let elapsed = last_activity.elapsed();
+                        let idle = Duration::from_secs(DAEMON_IDLE_SECS);
+                        if elapsed >= idle {
+                            Duration::from_millis(1)
+                        } else {
+                            idle - elapsed
+                        }
+                    } else {
+                        Duration::from_secs(60)
+                    };
+
+                    let (guard_after, _) = match self.cv.wait_timeout(q, wait_dur) {
+                        Ok(r) => r,
+                        Err(_) => return,
+                    };
+                    q = guard_after;
+                }
+
+                std::mem::take(&mut *q)
+            };
+
+            if task.stop_daemon {
+                if let Ok(mut g) = self.daemon.lock() {
+                    if let Some(d) = g.take() {
+                        d.shutdown();
+                    }
+                }
+                pending_bl_sync = None;
+                continue;
+            }
+
+            if task.warm {
+                if let Ok(mut g) = self.daemon.lock() {
+                    if g.is_none() {
+                        let _ = self.start_daemon_locked(&mut g);
+                    }
+                }
+                last_activity = Instant::now();
+            }
+
+            if task.step_bl_delta != 0 {
+                let mut cur = self.cached_bl.load(Ordering::Relaxed);
+                if !(0..=100).contains(&cur) {
+                    if let Some(resp) = self.daemon_cmd("G") {
+                        let mut parts = resp.split_whitespace();
+                        if parts.next() == Some("G") {
+                            if let Some(Ok(bl)) = parts.next().map(|s| s.parse::<i32>()) {
+                                if (0..=100).contains(&bl) {
+                                    cur = bl;
+                                    self.cached_bl.store(bl, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+                }
+                if !(0..=100).contains(&cur) {
+                    cur = 50;
+                }
+                let next = (cur + task.step_bl_delta).clamp(0, 100);
+                self.cached_bl.store(next, Ordering::Relaxed);
+                self.write_backlight_fast(next);
+                pending_bl_sync = Some((next, Instant::now() + Duration::from_millis(450)));
+                last_activity = Instant::now();
+            }
+
+            if let Some(v) = task.backlight {
+                self.write_backlight_fast(v);
+                last_activity = Instant::now();
+            }
+
+            if let Some(v) = task.volume {
+                self.write_volume_fast(v);
+                last_activity = Instant::now();
+            }
+
+            if let Some(v) = task.sync_backlight {
+                pending_bl_sync = None;
+                self.sync_backlight_settings(v);
+                last_activity = Instant::now();
+            } else if let Some((v, at)) = pending_bl_sync {
+                if Instant::now() >= at {
+                    pending_bl_sync = None;
+                    self.sync_backlight_settings(v);
+                    last_activity = Instant::now();
+                }
+            }
+
+            // Idle auto-shutdown when flyout is hidden & not in TV takeover
+            if !self.keep_warm.load(Ordering::Acquire)
+                && pending_bl_sync.is_none()
+                && last_activity.elapsed() >= Duration::from_secs(DAEMON_IDLE_SECS)
+            {
+                if let Ok(mut g) = self.daemon.lock() {
+                    if let Some(d) = g.take() {
+                        d.shutdown();
+                    }
+                }
+            }
+        }
+    }
+
+    fn write_backlight_fast(&self, v: i32) {
+        if let Some(resp) = self.daemon_cmd(&format!("B {}", v)) {
+            if resp.starts_with("OK") {
+                return;
+            }
+        }
+        // Fallback if MiTVDaemon unavailable
+        if self.ensure_connected() {
+            let cmd = format!(
+                "su 1000 -c 'CLASSPATH=/data/local/tmp/MtkDirectTool.jar /system/bin/app_process /data/local/tmp MtkDirectTool set g_disp__disp_back_light {} 3' >/dev/null 2>&1",
+                v
+            );
+            let _ = self.shell(&cmd, 3000);
+        }
+    }
+
+    fn write_volume_fast(&self, v: i32) {
+        if let Some(resp) = self.daemon_cmd(&format!("V {}", v)) {
+            if resp.starts_with("OK") {
+                return;
+            }
+        }
+        // Fast rootless Binder fallback (~68ms, works without Root!)
+        let cmd = format!("cmd media_session volume --stream 3 --set {} >/dev/null 2>&1", v);
+        let (code, _, _) = self.shell(&cmd, 2000);
+        if code != 0 && self.ensure_connected() {
+            let _ = self.shell(&cmd, 2500);
+        }
+    }
+
+    fn sync_backlight_settings(&self, v: i32) {
+        let cmd = format!(
+            "am broadcast -a com.xiaomi.mitv.action.PIC_MODE_CHANGED --ei picmode 7 >/dev/null 2>&1; \
+             settings put global picture_backlight {0}; settings put global xiaomi_picture_backlight {0}",
+            v
+        );
+        let _ = self.shell(&cmd, 3000);
     }
 
     pub fn query_status(&self) -> DeviceStatus {
@@ -160,10 +536,40 @@ impl DeviceController {
         st.connected = true;
         self.ensure_jars_deployed();
 
-        let cmd = "echo SRC=$(settings get global mitv.tvplayer.hdmi.last.source); \
-                   echo FOC=$(dumpsys window | grep -E 'mCurrentFocus|mFocusedApp' | head -n 2 | tr '\\n' ' '); \
-                   echo BL=$(su 1000 -c 'CLASSPATH=/data/local/tmp/MtkDirectTool.jar /system/bin/app_process /data/local/tmp MtkDirectTool get g_disp__disp_back_light' 2>/dev/null | grep -oE '[0-9]+$' | tail -n 1); \
-                   echo VOL=$(cmd media_session volume --stream 3 --get 2>/dev/null | grep -oE 'volume is [0-9]+' | grep -oE '[0-9]+')";
+        // If daemon is already warm, read BL & VOL in ~15ms!
+        let mut got_fast = false;
+        if let Ok(mut g) = self.daemon.lock() {
+            if let Some(ref mut d) = *g {
+                if let Some(resp) = d.send_cmd("G") {
+                    let mut parts = resp.split_whitespace();
+                    if parts.next() == Some("G") {
+                        if let Some(Ok(bl)) = parts.next().map(|s| s.parse::<i32>()) {
+                            if (0..=100).contains(&bl) {
+                                st.backlight = Some(bl);
+                                self.cached_bl.store(bl, Ordering::Relaxed);
+                            }
+                        }
+                        if let Some(Ok(vol)) = parts.next().map(|s| s.parse::<i32>()) {
+                            if (0..=100).contains(&vol) {
+                                st.volume = Some(vol);
+                                self.cached_vol.store(vol, Ordering::Relaxed);
+                            }
+                        }
+                        got_fast = st.backlight.is_some() && st.volume.is_some();
+                    }
+                }
+            }
+        }
+
+        let cmd = if got_fast {
+            "echo SRC=$(settings get global mitv.tvplayer.hdmi.last.source); \
+             echo FOC=$(dumpsys window | grep -E 'mCurrentFocus|mFocusedApp' | head -n 2 | tr '\\n' ' ')"
+        } else {
+            "echo SRC=$(settings get global mitv.tvplayer.hdmi.last.source); \
+             echo FOC=$(dumpsys window | grep -E 'mCurrentFocus|mFocusedApp' | head -n 2 | tr '\\n' ' '); \
+             echo BL=$(su 1000 -c 'CLASSPATH=/data/local/tmp/MtkDirectTool.jar /system/bin/app_process /data/local/tmp MtkDirectTool get g_disp__disp_back_light' 2>/dev/null | grep -oE '[0-9]+$' | tail -n 1); \
+             echo VOL=$(cmd media_session volume --stream 3 --get 2>/dev/null | grep -oE 'volume is [0-9]+' | grep -oE '[0-9]+')"
+        };
 
         let (_, out, _) = self.shell(cmd, 4500);
         let mut is_ext = false;
@@ -181,12 +587,14 @@ impl DeviceController {
                 if let Ok(n) = v.trim().parse::<i32>() {
                     if (0..=100).contains(&n) {
                         st.backlight = Some(n);
+                        self.cached_bl.store(n, Ordering::Relaxed);
                     }
                 }
             } else if let Some(v) = line.strip_prefix("VOL=") {
                 if let Ok(n) = v.trim().parse::<i32>() {
                     if (0..=100).contains(&n) {
                         st.volume = Some(n);
+                        self.cached_vol.store(n, Ordering::Relaxed);
                     }
                 }
             }
@@ -231,36 +639,6 @@ impl DeviceController {
         );
         let _ = self.shell(&cmd, 3500);
         true
-    }
-
-    pub fn set_backlight(&self, val: i32) -> bool {
-        let v = val.clamp(0, 100);
-        if !self.ensure_connected() {
-            return false;
-        }
-        self.ensure_jars_deployed();
-        let cmd = format!(
-            "su 1000 -c 'CLASSPATH=/data/local/tmp/MtkDirectTool.jar /system/bin/app_process /data/local/tmp MtkDirectTool set g_disp__disp_back_light {0} 3' >/dev/null 2>&1; \
-             am broadcast -a com.xiaomi.mitv.action.PIC_MODE_CHANGED --ei picmode 7 >/dev/null 2>&1; \
-             settings put global picture_backlight {0}; settings put global xiaomi_picture_backlight {0}",
-            v
-        );
-        let (code, _, _) = self.shell(&cmd, 4000);
-        code == 0
-    }
-
-    pub fn set_volume(&self, val: i32) -> bool {
-        let v = val.clamp(0, 100);
-        if !self.ensure_connected() {
-            return false;
-        }
-        self.ensure_jars_deployed();
-        let cmd = format!(
-            "su 1000 -c 'CLASSPATH=/data/local/tmp/VolDirectTool.jar /system/bin/app_process /data/local/tmp VolDirectTool set 3 {}' >/dev/null 2>&1",
-            v
-        );
-        let (code, _, _) = self.shell(&cmd, 3500);
-        code == 0
     }
 
     pub fn start_persistent_shell(&self) {

@@ -90,8 +90,8 @@ where
         let s = (dpi as f32 / 96.0).max(1.0);
         let sc = |v: f32| (v * s).round() as i32;
 
-        let cw = sc(452.0);
-        let ch = sc(386.0);
+        let cw = sc(456.0);
+        let ch = sc(392.0);
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
         let mut wr = RECT { left: 0, top: 0, right: cw, bottom: ch };
         AdjustWindowRectEx(&mut wr, style, 0, 0);
@@ -175,17 +175,17 @@ where
         make_ctrl("STATIC", "电视无线 ADB 地址 (IP:端口)：", 0, 0, pad, sc(16.0), inner, sc(20.0), 0);
         make_ctrl("EDIT", &addr, WS_EX_CLIENTEDGE, ES_AUTOHSCROLL | WS_TABSTOP, pad, sc(42.0), inner - sc(96.0), sc(28.0), ID_EDIT_ADDR);
         make_ctrl("BUTTON", "测试连接", 0, WS_TABSTOP, cw - pad - sc(88.0), sc(41.0), sc(88.0), sc(30.0), ID_BTN_TEST);
-        make_ctrl("STATIC", "键盘模式已固定为 SDK（兼容 TV 应用与小企鹅中文）", 0, 0, pad, sc(76.0), inner, sc(20.0), ID_LBL_STATUS);
+        make_ctrl("STATIC", "", 0, 0, pad, sc(74.0), inner, sc(18.0), ID_LBL_STATUS);
 
-        let chk_to = make_ctrl("BUTTON", "切换到「电视系统」时自动接管电脑键鼠", 0, BS_AUTOCHECKBOX | WS_TABSTOP, pad, sc(108.0), inner, sc(24.0), ID_CHK_TAKEOVER);
-        let chk_wh = make_ctrl("BUTTON", "接管期间鼠标滚轮映射为上下方向键", 0, BS_AUTOCHECKBOX | WS_TABSTOP, pad, sc(138.0), inner, sc(24.0), ID_CHK_WHEEL);
-        let chk_as = make_ctrl("BUTTON", "Windows 开机自动启动", 0, BS_AUTOCHECKBOX | WS_TABSTOP, pad, sc(168.0), inner, sc(24.0), ID_CHK_AUTOSTART);
+        let chk_to = make_ctrl("BUTTON", "切换到「电视系统」时自动接管电脑键鼠", 0, BS_AUTOCHECKBOX | WS_TABSTOP, pad, sc(98.0), inner, sc(24.0), ID_CHK_TAKEOVER);
+        let chk_wh = make_ctrl("BUTTON", "接管期间鼠标滚轮映射为上下方向键", 0, BS_AUTOCHECKBOX | WS_TABSTOP, pad, sc(128.0), inner, sc(24.0), ID_CHK_WHEEL);
+        let chk_as = make_ctrl("BUTTON", "Windows 开机自动启动", 0, BS_AUTOCHECKBOX | WS_TABSTOP, pad, sc(158.0), inner, sc(24.0), ID_CHK_AUTOSTART);
 
         SendMessageW(chk_to, BM_SETCHECK, if auto_to { BST_CHECKED } else { BST_UNCHECKED } as WPARAM, 0);
         SendMessageW(chk_wh, BM_SETCHECK, if wheel_dp { BST_CHECKED } else { BST_UNCHECKED } as WPARAM, 0);
         SendMessageW(chk_as, BM_SETCHECK, if is_autostart_enabled() { BST_CHECKED } else { BST_UNCHECKED } as WPARAM, 0);
 
-        make_ctrl("STATIC", &guide, 0, WS_BORDER, pad, sc(204.0), inner, sc(112.0), ID_LBL_GUIDE);
+        make_ctrl("STATIC", &guide, 0, WS_BORDER, pad, sc(194.0), inner, sc(132.0), ID_LBL_GUIDE);
 
         make_ctrl("BUTTON", "自定义快捷键...", 0, WS_TABSTOP, pad, ch - sc(46.0), sc(126.0), sc(32.0), ID_BTN_KEYMAP);
         make_ctrl("BUTTON", "保存", 0, BS_DEFPUSHBUTTON | WS_TABSTOP, cw - pad - sc(168.0), ch - sc(46.0), sc(78.0), sc(32.0), ID_BTN_SAVE);

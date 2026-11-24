@@ -73,11 +73,12 @@ pub enum KeyAction {
     VolUp = 5,
     VolDown = 6,
     Mute = 7,
-    Power = 8,
-    Recents = 9,
+    BrightnessUp = 8,
+    BrightnessDown = 9,
+    Power = 10,
 }
 
-pub const ACTION_COUNT: usize = 10;
+pub const ACTION_COUNT: usize = 11;
 
 pub const ALL_ACTIONS: [KeyAction; ACTION_COUNT] = [
     KeyAction::ReturnDp,
@@ -88,8 +89,9 @@ pub const ALL_ACTIONS: [KeyAction; ACTION_COUNT] = [
     KeyAction::VolUp,
     KeyAction::VolDown,
     KeyAction::Mute,
+    KeyAction::BrightnessUp,
+    KeyAction::BrightnessDown,
     KeyAction::Power,
-    KeyAction::Recents,
 ];
 
 impl KeyAction {
@@ -107,8 +109,9 @@ impl KeyAction {
             KeyAction::VolUp => "Key.VolUp",
             KeyAction::VolDown => "Key.VolDown",
             KeyAction::Mute => "Key.Mute",
+            KeyAction::BrightnessUp => "Key.BrightnessUp",
+            KeyAction::BrightnessDown => "Key.BrightnessDown",
             KeyAction::Power => "Key.Power",
-            KeyAction::Recents => "Key.Recents",
         }
     }
 
@@ -122,13 +125,20 @@ impl KeyAction {
             KeyAction::VolUp => "音量 + (支持连发)",
             KeyAction::VolDown => "音量 - (支持连发)",
             KeyAction::Mute => "静音",
+            KeyAction::BrightnessUp => "亮度 + (支持连发)",
+            KeyAction::BrightnessDown => "亮度 - (支持连发)",
             KeyAction::Power => "待机息屏",
-            KeyAction::Recents => "最近任务 (应用切换)",
         }
     }
 
     pub const fn is_repeatable(self) -> bool {
-        matches!(self, KeyAction::VolUp | KeyAction::VolDown)
+        matches!(
+            self,
+            KeyAction::VolUp
+                | KeyAction::VolDown
+                | KeyAction::BrightnessUp
+                | KeyAction::BrightnessDown
+        )
     }
 
     pub const fn is_required(self) -> bool {
@@ -144,8 +154,10 @@ impl KeyAction {
             KeyAction::VolDown => Some(25),
             KeyAction::Mute => Some(164),
             KeyAction::Power => Some(26),
-            KeyAction::Recents => Some(187),
-            KeyAction::ReturnDp | KeyAction::Voice => None,
+            KeyAction::ReturnDp
+            | KeyAction::Voice
+            | KeyAction::BrightnessUp
+            | KeyAction::BrightnessDown => None,
         }
     }
 }
@@ -157,12 +169,12 @@ pub struct KeyMap {
 
 impl Default for KeyMap {
     fn default() -> Self {
-        Self::preset_default_75()
+        Self::preset_1()
     }
 }
 
 impl KeyMap {
-    pub fn preset_default_75() -> Self {
+    pub fn preset_1() -> Self {
         let mut b = [None; ACTION_COUNT];
         b[KeyAction::ReturnDp.index()] = Some(KeyChord::new(MOD_CTRL | MOD_ALT, b'D' as u16));
         b[KeyAction::Back.index()] = Some(KeyChord::new(0, VK_ESCAPE));
@@ -172,12 +184,13 @@ impl KeyMap {
         b[KeyAction::VolUp.index()] = Some(KeyChord::new(0, VK_PRIOR));
         b[KeyAction::VolDown.index()] = Some(KeyChord::new(0, VK_NEXT));
         b[KeyAction::Mute.index()] = Some(KeyChord::new(MOD_CTRL | MOD_ALT, b'M' as u16));
+        b[KeyAction::BrightnessUp.index()] = Some(KeyChord::new(MOD_CTRL | MOD_ALT, VK_UP));
+        b[KeyAction::BrightnessDown.index()] = Some(KeyChord::new(MOD_CTRL | MOD_ALT, VK_DOWN));
         b[KeyAction::Power.index()] = Some(KeyChord::new(MOD_CTRL | MOD_ALT, b'P' as u16));
-        b[KeyAction::Recents.index()] = None;
         Self { bindings: b }
     }
 
-    pub fn preset_compact_60() -> Self {
+    pub fn preset_2() -> Self {
         let mut b = [None; ACTION_COUNT];
         b[KeyAction::ReturnDp.index()] = Some(KeyChord::new(MOD_CTRL | MOD_ALT, b'D' as u16));
         b[KeyAction::Back.index()] = Some(KeyChord::new(0, VK_ESCAPE));
@@ -187,8 +200,9 @@ impl KeyMap {
         b[KeyAction::VolUp.index()] = Some(KeyChord::new(MOD_ALT, VK_UP));
         b[KeyAction::VolDown.index()] = Some(KeyChord::new(MOD_ALT, VK_DOWN));
         b[KeyAction::Mute.index()] = Some(KeyChord::new(MOD_CTRL | MOD_ALT, b'M' as u16));
+        b[KeyAction::BrightnessUp.index()] = Some(KeyChord::new(MOD_CTRL | MOD_ALT, VK_UP));
+        b[KeyAction::BrightnessDown.index()] = Some(KeyChord::new(MOD_CTRL | MOD_ALT, VK_DOWN));
         b[KeyAction::Power.index()] = Some(KeyChord::new(MOD_CTRL | MOD_ALT, b'P' as u16));
-        b[KeyAction::Recents.index()] = None;
         Self { bindings: b }
     }
 
@@ -238,6 +252,7 @@ impl KeyMap {
             "当前遥控快捷键（仅接管电视期间生效，回电脑自动注销）：\r\n\
              • 返回 / 主页 / 菜单 / 语音：{} / {} / {} / {}\r\n\
              • 音量 + / - / 静音：{} / {} / {}\r\n\
+             • 亮度 + / -：{} / {}\r\n\
              • 待机息屏 / 切回电脑 DP：{} / {}",
             f(KeyAction::Back),
             f(KeyAction::Home),
@@ -246,6 +261,8 @@ impl KeyMap {
             f(KeyAction::VolUp),
             f(KeyAction::VolDown),
             f(KeyAction::Mute),
+            f(KeyAction::BrightnessUp),
+            f(KeyAction::BrightnessDown),
             f(KeyAction::Power),
             f(KeyAction::ReturnDp),
         )

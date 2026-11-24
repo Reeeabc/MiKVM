@@ -307,11 +307,12 @@ fn open_settings() {
 }
 
 fn exit_app() {
-    let info = with_host(|h| (h.hwnd, h.idle_icon, h.active_icon, Arc::clone(&h.takeover)));
-    if let Some((hwnd, idle_icon, active_icon, takeover)) = info {
+    let info = with_host(|h| (h.hwnd, h.idle_icon, h.active_icon, Arc::clone(&h.takeover), Arc::clone(&h.dev)));
+    if let Some((hwnd, idle_icon, active_icon, takeover, dev)) = info {
         if let Ok(mut to) = takeover.lock() {
             to.stop();
         }
+        dev.stop_daemon_now();
         unsafe {
             KillTimer(hwnd, TIMER_IME_GUARD);
             remove_tray_icon(hwnd);
@@ -563,16 +564,24 @@ fn main() {
         });
     });
 
-    let dev_for_sliders = Arc::clone(&dev);
+    let dev_for_flyout = Arc::clone(&dev);
+    let takeover_for_flyout = Arc::clone(&takeover);
     let _flyout_hwnd = create_flyout(move |act| match act {
         FlyoutAction::SwitchSource(src) => handle_source_click(src),
-        FlyoutAction::SetBacklight(v) => {
-            let d = Arc::clone(&dev_for_sliders);
-            std::thread::spawn(move || { let _ = d.set_backlight(v); });
-        }
-        FlyoutAction::SetVolume(v) => {
-            let d = Arc::clone(&dev_for_sliders);
-            std::thread::spawn(move || { let _ = d.set_volume(v); });
+        FlyoutAction::SetBacklight(v, commit) => dev_for_flyout.queue_backlight(v, commit),
+        FlyoutAction::SetVolume(v) => dev_for_flyout.queue_volume(v),
+        FlyoutAction::VisibilityChanged(vis) => {
+            if vis {
+                dev_for_flyout.set_keep_warm(true);
+            } else {
+                let running = takeover_for_flyout
+                    .lock()
+                    .map(|t| t.is_running())
+                    .unwrap_or(false);
+                if !running {
+                    dev_for_flyout.set_keep_warm(false);
+                }
+            }
         }
         FlyoutAction::OpenSettings => open_settings(),
         FlyoutAction::Refresh => trigger_refresh(false),

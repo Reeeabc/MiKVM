@@ -23,28 +23,28 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const FLYOUT_CLASS: &str = "MiTVSwitchFluentFlyout";
-const TIMER_BL_DEBOUNCE: usize = 101;
-const TIMER_VOL_DEBOUNCE: usize = 102;
+const SLIDER_THROTTLE_MS: u128 = 35;
 const DWMWCP_ROUND: i32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FlyoutAction {
     SwitchSource(SignalSource),
-    SetBacklight(i32),
+    SetBacklight(i32, bool),
     SetVolume(i32),
     OpenSettings,
     Refresh,
+    VisibilityChanged(bool),
     Exit,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HitPart {
     None,
+    StatusReconnect,
     Tile(SignalSource),
     SliderBacklight,
     SliderVolume,
     BtnSettings,
-    BtnRefresh,
     BtnExit,
 }
 
@@ -67,12 +67,12 @@ struct FlyoutLayout {
     w: i32,
     h: i32,
     pad: f32,
+    status_row: RectF4,
     tiles: [(SignalSource, &'static str, RectF4, RectF4); 4], // (src, label, full_hit, card_rect)
     bl_slider: RectF4,
     vol_slider: RectF4,
     footer_y: f32,
     btn_settings: RectF4,
-    btn_refresh: RectF4,
     btn_exit: RectF4,
 }
 
@@ -115,6 +115,7 @@ impl FlyoutLayout {
             w,
             h,
             pad,
+            status_row: RectF4 { x: pad - 6.0 * s, y: 8.0 * s, w: inner_w + 12.0 * s, h: 34.0 * s },
             tiles: [
                 make_tile(SignalSource::TvSystem, "电视系统", pad, grid_top),
                 make_tile(SignalSource::Dp, "电脑 DP", pad + tile_w + col_gap, grid_top),
@@ -124,13 +125,15 @@ impl FlyoutLayout {
             bl_slider: RectF4 { x: slider_x, y: 280.0 * s, w: slider_w, h: 26.0 * s },
             vol_slider: RectF4 { x: slider_x, y: 334.0 * s, w: slider_w, h: 26.0 * s },
             footer_y,
-            btn_settings: RectF4 { x: pad, y: btn_y, w: 92.0 * s, h: btn_h },
-            btn_refresh: RectF4 { x: pad + 100.0 * s, y: btn_y, w: 62.0 * s, h: btn_h },
-            btn_exit: RectF4 { x: wf - pad - 62.0 * s, y: btn_y, w: 62.0 * s, h: btn_h },
+            btn_settings: RectF4 { x: pad, y: btn_y, w: 96.0 * s, h: btn_h },
+            btn_exit: RectF4 { x: wf - pad - 66.0 * s, y: btn_y, w: 66.0 * s, h: btn_h },
         }
     }
 
-    fn hit_test(&self, px: f32, py: f32) -> HitPart {
+    fn hit_test(&self, px: f32, py: f32, can_reconnect: bool) -> HitPart {
+        if can_reconnect && self.status_row.contains(px, py) {
+            return HitPart::StatusReconnect;
+        }
         for (src, _, hit, _) in &self.tiles {
             if hit.contains(px, py) {
                 return HitPart::Tile(*src);
@@ -144,9 +147,6 @@ impl FlyoutLayout {
         }
         if self.btn_settings.contains(px, py) {
             return HitPart::BtnSettings;
-        }
-        if self.btn_refresh.contains(px, py) {
-            return HitPart::BtnRefresh;
         }
         if self.btn_exit.contains(px, py) {
             return HitPart::BtnExit;
@@ -175,6 +175,8 @@ struct FlyoutState {
     pressed: HitPart,
     dragging_bl: bool,
     dragging_vol: bool,
+    last_bl_emit: Option<Instant>,
+    last_vol_emit: Option<Instant>,
     visible: bool,
     suppress_deactivate: bool,
     last_hidden: Option<Instant>,
@@ -256,6 +258,8 @@ where
                 pressed: HitPart::None,
                 dragging_bl: false,
                 dragging_vol: false,
+                last_bl_emit: None,
+                last_vol_emit: None,
                 visible: false,
                 suppress_deactivate: false,
                 last_hidden: None,
@@ -305,6 +309,7 @@ pub fn show_flyout_near_tray() {
                 st.suppress_deactivate = false;
             }
         });
+        emit_action(FlyoutAction::VisibilityChanged(true));
     }
 }
 
@@ -326,6 +331,7 @@ pub fn hide_flyout() {
         unsafe {
             ShowWindow(hwnd, SW_HIDE);
         }
+        emit_action(FlyoutAction::VisibilityChanged(false));
     }
 }
 
@@ -355,7 +361,7 @@ pub fn update_flyout_status(ds: &DeviceStatus, addr: &str, takeover_active: bool
             st.connected = ds.connected;
             st.active_source = ds.active_source;
             st.status_text = if !ds.connected {
-                format!("未连接 {}", addr)
+                format!("未连接 {}（点击重连）", addr)
             } else if takeover_active {
                 format!("键鼠接管中 · 当前：{}", ds.active_source.label())
             } else {
@@ -431,7 +437,12 @@ unsafe fn paint_flyout(st: &FlyoutState, hdc: windows_sys::Win32::Graphics::Gdi:
     draw_line(g, 0.0, l.footer_y, l.w as f32, l.footer_y, COL_DIVIDER, 1.0);
     draw_rect_border(g, 0.0, 0.0, (l.w - 1) as f32, (l.h - 1) as f32, COL_CARD_BORDER, 1.0);
 
-    // Status row
+    // Status row (clickable to reconnect when disconnected)
+    let can_reconnect = !st.connected && !st.refreshing;
+    if can_reconnect && (st.hover == HitPart::StatusReconnect || st.pressed == HitPart::StatusReconnect) {
+        let bg = if st.pressed == HitPart::StatusReconnect { COL_CARD_PRESSED } else { COL_FOOTER_BG };
+        fill_round_rect(g, l.status_row.x, l.status_row.y, l.status_row.w, l.status_row.h, 6.0 * s, bg);
+    }
     let dot_col = if st.refreshing {
         COL_STATUS_AMBER
     } else if st.connected {
@@ -554,9 +565,8 @@ unsafe fn paint_flyout(st: &FlyoutState, hdc: windows_sys::Win32::Graphics::Gdi:
         StringAlignmentCenter,
     );
 
-    // Footer buttons
+    // Footer buttons (minimalist: Settings + Exit; click red status row to reconnect)
     paint_btn(g, &l.btn_settings, "ADB 设置...", st.hover == HitPart::BtnSettings, st.pressed == HitPart::BtnSettings, s);
-    paint_btn(g, &l.btn_refresh, "刷新", st.hover == HitPart::BtnRefresh, st.pressed == HitPart::BtnRefresh, s);
     paint_btn(g, &l.btn_exit, "退出", st.hover == HitPart::BtnExit, st.pressed == HitPart::BtnExit, s);
 
     GdipDeleteGraphics(g);
@@ -658,7 +668,7 @@ unsafe extern "system" fn flyout_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
             TrackMouseEvent(&mut tme);
 
             let mut need_repaint = false;
-            let mut timer_to_set: Option<(usize, u32)> = None;
+            let mut action: Option<FlyoutAction> = None;
             let mut use_hand = false;
             FLYOUT_STATE.with(|c| {
                 if let Some(st) = c.borrow_mut().as_mut() {
@@ -666,18 +676,33 @@ unsafe extern "system" fn flyout_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
                         let v = st.layout.slider_value_from_x(&st.layout.bl_slider, px);
                         if st.backlight != Some(v) {
                             st.backlight = Some(v);
-                            timer_to_set = Some((TIMER_BL_DEBOUNCE, 160));
                             need_repaint = true;
+                            let allow = st
+                                .last_bl_emit
+                                .map(|t| t.elapsed().as_millis() >= SLIDER_THROTTLE_MS)
+                                .unwrap_or(true);
+                            if allow {
+                                st.last_bl_emit = Some(Instant::now());
+                                action = Some(FlyoutAction::SetBacklight(v, false));
+                            }
                         }
                     } else if st.dragging_vol {
                         let v = st.layout.slider_value_from_x(&st.layout.vol_slider, px);
                         if st.volume != Some(v) {
                             st.volume = Some(v);
-                            timer_to_set = Some((TIMER_VOL_DEBOUNCE, 140));
                             need_repaint = true;
+                            let allow = st
+                                .last_vol_emit
+                                .map(|t| t.elapsed().as_millis() >= SLIDER_THROTTLE_MS)
+                                .unwrap_or(true);
+                            if allow {
+                                st.last_vol_emit = Some(Instant::now());
+                                action = Some(FlyoutAction::SetVolume(v));
+                            }
                         }
                     } else {
-                        let hit = st.layout.hit_test(px, py);
+                        let can_reconnect = !st.connected && !st.refreshing;
+                        let hit = st.layout.hit_test(px, py, can_reconnect);
                         if st.hover != hit {
                             st.hover = hit;
                             need_repaint = true;
@@ -686,12 +711,12 @@ unsafe extern "system" fn flyout_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
                     use_hand = st.hover != HitPart::None || st.dragging_bl || st.dragging_vol;
                 }
             });
-            if let Some((tid, ms)) = timer_to_set {
-                SetTimer(hwnd, tid, ms, None);
-            }
             SetCursor(LoadCursorW(ptr::null_mut(), if use_hand { IDC_HAND } else { IDC_ARROW }));
             if need_repaint {
                 InvalidateRect(hwnd, ptr::null(), 0);
+            }
+            if let Some(a) = action {
+                emit_action(a);
             }
             0
         }
@@ -714,33 +739,36 @@ unsafe extern "system" fn flyout_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
             let px = (lp as i16) as f32;
             let py = ((lp >> 16) as i16) as f32;
             let mut capture = false;
-            let mut timer_to_set: Option<(usize, u32)> = None;
+            let mut action: Option<FlyoutAction> = None;
             FLYOUT_STATE.with(|c| {
                 if let Some(st) = c.borrow_mut().as_mut() {
-                    let hit = st.layout.hit_test(px, py);
+                    let can_reconnect = !st.connected && !st.refreshing;
+                    let hit = st.layout.hit_test(px, py, can_reconnect);
                     st.pressed = hit;
                     if hit == HitPart::SliderBacklight {
                         st.dragging_bl = true;
                         capture = true;
                         let v = st.layout.slider_value_from_x(&st.layout.bl_slider, px);
                         st.backlight = Some(v);
-                        timer_to_set = Some((TIMER_BL_DEBOUNCE, 160));
+                        st.last_bl_emit = Some(Instant::now());
+                        action = Some(FlyoutAction::SetBacklight(v, false));
                     } else if hit == HitPart::SliderVolume {
                         st.dragging_vol = true;
                         capture = true;
                         let v = st.layout.slider_value_from_x(&st.layout.vol_slider, px);
                         st.volume = Some(v);
-                        timer_to_set = Some((TIMER_VOL_DEBOUNCE, 140));
+                        st.last_vol_emit = Some(Instant::now());
+                        action = Some(FlyoutAction::SetVolume(v));
                     }
                 }
             });
             if capture {
                 SetCapture(hwnd);
             }
-            if let Some((tid, ms)) = timer_to_set {
-                SetTimer(hwnd, tid, ms, None);
-            }
             InvalidateRect(hwnd, ptr::null(), 0);
+            if let Some(a) = action {
+                emit_action(a);
+            }
             0
         }
         WM_LBUTTONUP => {
@@ -748,34 +776,32 @@ unsafe extern "system" fn flyout_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
             let py = ((lp >> 16) as i16) as f32;
             let mut action: Option<FlyoutAction> = None;
             let mut release_cap = false;
-            let mut kill_tid: Option<usize> = None;
             let mut should_hide = false;
             FLYOUT_STATE.with(|c| {
                 if let Some(st) = c.borrow_mut().as_mut() {
                     if st.dragging_bl {
                         st.dragging_bl = false;
                         release_cap = true;
-                        kill_tid = Some(TIMER_BL_DEBOUNCE);
                         let v = st.layout.slider_value_from_x(&st.layout.bl_slider, px);
                         st.backlight = Some(v);
-                        action = Some(FlyoutAction::SetBacklight(v));
+                        action = Some(FlyoutAction::SetBacklight(v, true));
                     } else if st.dragging_vol {
                         st.dragging_vol = false;
                         release_cap = true;
-                        kill_tid = Some(TIMER_VOL_DEBOUNCE);
                         let v = st.layout.slider_value_from_x(&st.layout.vol_slider, px);
                         st.volume = Some(v);
                         action = Some(FlyoutAction::SetVolume(v));
                     } else {
-                        let hit = st.layout.hit_test(px, py);
+                        let can_reconnect = !st.connected && !st.refreshing;
+                        let hit = st.layout.hit_test(px, py, can_reconnect);
                         if hit == st.pressed {
                             action = match hit {
+                                HitPart::StatusReconnect => Some(FlyoutAction::Refresh),
                                 HitPart::Tile(src) => Some(FlyoutAction::SwitchSource(src)),
                                 HitPart::BtnSettings => {
                                     should_hide = true;
                                     Some(FlyoutAction::OpenSettings)
                                 }
-                                HitPart::BtnRefresh => Some(FlyoutAction::Refresh),
                                 HitPart::BtnExit => {
                                     should_hide = true;
                                     Some(FlyoutAction::Exit)
@@ -790,38 +816,9 @@ unsafe extern "system" fn flyout_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
             if release_cap {
                 ReleaseCapture();
             }
-            if let Some(tid) = kill_tid {
-                KillTimer(hwnd, tid);
-            }
             InvalidateRect(hwnd, ptr::null(), 0);
             if should_hide {
                 hide_flyout();
-            }
-            if let Some(a) = action {
-                emit_action(a);
-            }
-            0
-        }
-        WM_TIMER => {
-            let mut action: Option<FlyoutAction> = None;
-            if wp == TIMER_BL_DEBOUNCE {
-                KillTimer(hwnd, TIMER_BL_DEBOUNCE);
-                FLYOUT_STATE.with(|c| {
-                    if let Some(st) = c.borrow().as_ref() {
-                        if let Some(v) = st.backlight {
-                            action = Some(FlyoutAction::SetBacklight(v));
-                        }
-                    }
-                });
-            } else if wp == TIMER_VOL_DEBOUNCE {
-                KillTimer(hwnd, TIMER_VOL_DEBOUNCE);
-                FLYOUT_STATE.with(|c| {
-                    if let Some(st) = c.borrow().as_ref() {
-                        if let Some(v) = st.volume {
-                            action = Some(FlyoutAction::SetVolume(v));
-                        }
-                    }
-                });
             }
             if let Some(a) = action {
                 emit_action(a);
