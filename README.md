@@ -116,7 +116,7 @@
 
 ---
 
-## 从源码构建
+## 从源码构建与开发者文档
 
 需要 Rust 工具链（Windows MSVC 或 MinGW/GNU 均可）：
 
@@ -125,7 +125,8 @@ cargo build --release
 copy target\release\MiKVM.exe .\MiKVM.exe
 ```
 
-> 如需早期无外部依赖的 C# (.NET Framework 4) 原型版本源码，请切换至历史标签 `v1.0-csharp`。
+- 详细架构设计、`MiTVDaemon` 协议与二次开发指南见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)（AI 协作维护规范见 [AGENTS.md](AGENTS.md)）。
+- 如需早期无外部依赖的 C# (.NET Framework 4) 原型版本源码，请切换至历史标签 `v1.0-csharp`。
 
 ---
 
