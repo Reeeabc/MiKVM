@@ -93,7 +93,7 @@
 
 ### 2. 已 Root 进阶方案：小企鹅输入法（[Fcitx5 for Android](https://github.com/fcitx5-android/fcitx5-android/releases)）
 - **特点**：启动快、自带现代简体拼音词库、实体键盘悬浮候选条精致小巧。
-- **注意点**：在小米澎湃OS TV 上直接安装时，非输入框界面容易抢焦点/拦截方向键，需在 Root + Zygisk（LSPosed / Vector）环境下搭配针对 `org.fcitx.fcitx5.android` 的焦点避让 Hook 模块使用。
+- **注意点**：在小米澎湃OS TV 上直接安装时，非输入框界面容易抢焦点/拦截方向键，需在 Root + Zygisk（LSPosed / Vector）环境下搭配本仓库附带的轻量修复模块 **[extras/Fcitx5TvFix](extras/Fcitx5TvFix/README.md)**（仅 Hook `org.fcitx.fcitx5.android`，不改系统框架）。
 
 ---
 

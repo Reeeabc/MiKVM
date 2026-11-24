@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.mitv.fcitx5tvfix"
+    android:versionCode="1"
+    android:versionName="1.0.0">
+
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />
+
+    <application
+        android:label="Fcitx5 TV Fix"
+        android:description="@string/app_desc"
+        android:hasCode="true">
+        <meta-data android:name="xposedmodule" android:value="true" />
+        <meta-data android:name="xposeddescription" android:value="Fix Fcitx5 Android focus/ANR and D-pad key interception on Xiaomi TV" />
+        <meta-data android:name="xposedminversion" android:value="100" />
+    </application>
+</manifest>

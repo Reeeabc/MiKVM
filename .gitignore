@@ -11,6 +11,10 @@ dist/
 target/
 Cargo.lock
 
+# Signing keys (never commit)
+*.jks
+*.keystore
+
 # IDE / OS
 .vs/
 .vscode/

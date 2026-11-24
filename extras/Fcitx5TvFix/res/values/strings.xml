@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_desc">Fix Fcitx5 Android focus/ANR and D-pad key interception on Xiaomi TV</string>
+</resources>
