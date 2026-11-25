@@ -1,9 +1,11 @@
 use crate::config::{to_wide, DeviceStatus, SignalSource};
+use crate::display::visible_work_area_for_cursor;
 use crate::gdi::*;
+use crate::takeover::TakeoverMode;
 use std::cell::RefCell;
 use std::ptr;
 use std::time::Instant;
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 const WM_MOUSELEAVE_MSG: u32 = 0x02A3;
 use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -321,12 +323,16 @@ pub fn was_just_hidden() -> bool {
     })
 }
 
-pub fn show_flyout_near_tray() {
+pub fn show_flyout_near_tray(avoid_tv_ghost: bool, tv_hint: &str, lid_open: bool) {
     let pal = ThemePalette::current();
+    let (wa, scale) = visible_work_area_for_cursor(avoid_tv_ghost, tv_hint, lid_open);
     let info = FLYOUT_STATE.with(|c| {
         let mut borrow = c.borrow_mut();
         borrow.as_mut().map(|st| {
             st.palette = pal;
+            if (st.layout.s - scale).abs() > 0.01 {
+                st.layout = FlyoutLayout::new(scale);
+            }
             st.suppress_deactivate = true;
             st.visible = true;
             (st.hwnd, st.layout.w, st.layout.h, st.layout.s)
@@ -336,8 +342,6 @@ pub fn show_flyout_near_tray() {
         let (x, y, offset_px) = unsafe {
             apply_dwm_dark_titlebar(hwnd, pal.dark);
             apply_dwm_border_color(hwnd, pal.dwm_border_bgr);
-            let mut wa: RECT = std::mem::zeroed();
-            SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut wa as *mut _ as *mut _, 0);
             let margin = (12.0 * s).round() as i32;
             let tx = wa.right - w - margin;
             let ty = wa.bottom - h - margin;
@@ -406,7 +410,21 @@ pub fn set_flyout_refreshing(addr: &str, silent_if_connected: bool) {
     }
 }
 
-pub fn update_flyout_status(ds: &DeviceStatus, addr: &str, takeover_active: bool) {
+fn format_connected_status(mode: TakeoverMode, src: SignalSource, addr: &str) -> String {
+    match mode {
+        TakeoverMode::TvFocused | TakeoverMode::TvLocked => {
+            format!("控制电视中 · 当前：{}", src.label())
+        }
+        TakeoverMode::TvStandby => {
+            format!("电视待命 (焦点在电脑) · 当前：{}", src.label())
+        }
+        TakeoverMode::Idle => {
+            format!("已连接 {} · 当前：{}", addr, src.label())
+        }
+    }
+}
+
+pub fn update_flyout_status(ds: &DeviceStatus, addr: &str, mode: TakeoverMode) {
     let hwnd = FLYOUT_STATE.with(|c| {
         let mut borrow = c.borrow_mut();
         if let Some(st) = borrow.as_mut() {
@@ -415,10 +433,8 @@ pub fn update_flyout_status(ds: &DeviceStatus, addr: &str, takeover_active: bool
             st.active_source = ds.active_source;
             st.status_text = if !ds.connected {
                 format!("未连接 {}（点击重连）", addr)
-            } else if takeover_active {
-                format!("键鼠接管中 · 当前：{}", ds.active_source.label())
             } else {
-                format!("已连接 {} · 当前：{}", addr, ds.active_source.label())
+                format_connected_status(mode, ds.active_source, addr)
             };
             if let Some(b) = ds.backlight {
                 if !st.dragging_bl {
@@ -439,18 +455,14 @@ pub fn update_flyout_status(ds: &DeviceStatus, addr: &str, takeover_active: bool
     }
 }
 
-pub fn set_flyout_optimistic_source(src: SignalSource, addr: &str, takeover_active: bool) {
+pub fn set_flyout_optimistic_source(src: SignalSource, addr: &str, mode: TakeoverMode) {
     let hwnd = FLYOUT_STATE.with(|c| {
         let mut borrow = c.borrow_mut();
         if let Some(st) = borrow.as_mut() {
             st.connected = true;
             st.refreshing = false;
             st.active_source = src;
-            st.status_text = if takeover_active {
-                format!("键鼠接管中 · 当前：{}", src.label())
-            } else {
-                format!("已连接 {} · 当前：{}", addr, src.label())
-            };
+            st.status_text = format_connected_status(mode, src, addr);
             return Some(st.hwnd);
         }
         None

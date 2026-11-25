@@ -1,15 +1,17 @@
 use crate::adb::DeviceController;
 use crate::config::{from_wide, is_autostart_enabled, set_autostart, to_wide, AppConfig};
+use crate::display::visible_work_area_for_cursor;
 use crate::gdi::{apply_dark_control_theme, apply_dwm_dark_titlebar, ThemePalette};
 use crate::keymap_ui::show_keymap_window;
+use crate::takeover::current_mode;
 use std::cell::RefCell;
 use std::ptr;
 use std::sync::{Arc, Mutex};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    CreateFontW, CreateSolidBrush, DeleteObject, FillRect, GetDC, GetDeviceCaps, ReleaseDC,
-    SetBkColor, SetTextColor, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET,
-    DEFAULT_PITCH, FF_DONTCARE, FW_NORMAL, HBRUSH, HFONT, LOGPIXELSX, OUT_DEFAULT_PRECIS,
+    CreateFontW, CreateSolidBrush, DeleteObject, FillRect, SetBkColor, SetTextColor,
+    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, FF_DONTCARE, FW_NORMAL,
+    HBRUSH, HFONT, OUT_DEFAULT_PRECIS,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::{BST_CHECKED, BST_UNCHECKED};
@@ -29,6 +31,12 @@ const ID_LBL_GUIDE: i32 = 210;
 const ID_LBL_CHK_TAKEOVER: i32 = 214;
 const ID_LBL_CHK_WHEEL: i32 = 215;
 const ID_LBL_CHK_AUTOSTART: i32 = 216;
+const ID_CHK_EDGE: i32 = 220;
+const ID_CHK_CLIP: i32 = 221;
+const ID_CHK_AUTO_INT: i32 = 222;
+const ID_LBL_CHK_EDGE: i32 = 230;
+const ID_LBL_CHK_CLIP: i32 = 231;
+const ID_LBL_CHK_AUTO_INT: i32 = 232;
 const WM_TEST_DONE: u32 = WM_APP + 50;
 
 const BM_GETCHECK: u32 = 0x00F0;
@@ -88,34 +96,30 @@ where
             RegisterClassW(&wc);
         });
 
-        let hdc = GetDC(ptr::null_mut());
-        let dpi = if !hdc.is_null() {
-            let d = GetDeviceCaps(hdc, LOGPIXELSX as i32);
-            ReleaseDC(ptr::null_mut(), hdc);
-            d
-        } else {
-            96
-        };
-        let s = (dpi as f32 / 96.0).max(1.0);
+        let tv_hint = cfg
+            .lock()
+            .map(|c| c.tv_monitor_hint.clone())
+            .unwrap_or_else(|_| "Mi Monitor".to_string());
+        let (wa, s) = visible_work_area_for_cursor(current_mode().is_session_active(), &tv_hint, true);
         let sc = |v: f32| (v * s).round() as i32;
 
-        let cw = sc(456.0);
-        let ch = sc(392.0);
+        let cw = sc(468.0);
+        let ch = sc(486.0);
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
         let mut wr = RECT { left: 0, top: 0, right: cw, bottom: ch };
         AdjustWindowRectEx(&mut wr, style, 0, 0);
         let ww = wr.right - wr.left;
         let wh = wr.bottom - wr.top;
-        let sw = GetSystemMetrics(SM_CXSCREEN);
-        let sh = GetSystemMetrics(SM_CYSCREEN);
+        let wx = wa.left + ((wa.right - wa.left) - ww) / 2;
+        let wy = wa.top + ((wa.bottom - wa.top) - wh) / 2;
 
         let hwnd = CreateWindowExW(
             WS_EX_TOPMOST,
             cls_w.as_ptr(),
-            to_wide("ADB 与键鼠设置 — MiKVM").as_ptr(),
+            to_wide("ADB 与多屏键鼠设置 — MiKVM").as_ptr(),
             style,
-            (sw - ww) / 2,
-            (sh - wh) / 2,
+            wx,
+            wy,
             ww,
             wh,
             ptr::null_mut(),
@@ -144,13 +148,16 @@ where
 
         let pad = sc(20.0);
         let inner = cw - pad * 2;
-        let (addr, auto_to, wheel_dp, guide) = cfg
+        let (addr, auto_to, wheel_dp, edge_sw, clip_sync, auto_int, guide) = cfg
             .lock()
             .map(|c| {
                 (
                     c.tv_address.clone(),
                     c.auto_takeover_on_tv,
                     c.wheel_as_dpad,
+                    c.edge_switch,
+                    c.clipboard_sync,
+                    c.auto_internal_on_tv,
                     c.keymap.summary_text(),
                 )
             })
@@ -159,6 +166,9 @@ where
                     "192.168.1.200:5555".to_string(),
                     true,
                     true,
+                    true,
+                    true,
+                    false,
                     crate::keymap::KeyMap::default().summary_text(),
                 )
             });
@@ -197,15 +207,21 @@ where
         make_ctrl("BUTTON", "测试连接", 0, WS_TABSTOP, cw - pad - sc(88.0), sc(41.0), sc(88.0), sc(30.0), ID_BTN_TEST);
         make_ctrl("STATIC", "", 0, 0, pad, sc(74.0), inner, sc(18.0), ID_LBL_STATUS);
 
-        let chk_to = make_checkbox("切换到「电视系统」时自动接管电脑键鼠", sc(98.0), ID_CHK_TAKEOVER, ID_LBL_CHK_TAKEOVER);
-        let chk_wh = make_checkbox("接管期间鼠标滚轮映射为上下方向键", sc(128.0), ID_CHK_WHEEL, ID_LBL_CHK_WHEEL);
-        let chk_as = make_checkbox("Windows 开机自动启动", sc(158.0), ID_CHK_AUTOSTART, ID_LBL_CHK_AUTOSTART);
+        let chk_to = make_checkbox("切换到「电视系统」时自动开启直连键鼠控制", sc(96.0), ID_CHK_TAKEOVER, ID_LBL_CHK_TAKEOVER);
+        let chk_edge = make_checkbox("多屏时鼠标滑过边界自动切入电视（防误触阻尼）", sc(124.0), ID_CHK_EDGE, ID_LBL_CHK_EDGE);
+        let chk_clip = make_checkbox("电脑 ↔ 电视剪贴板按需同步（自动过滤密码隐私）", sc(152.0), ID_CHK_CLIP, ID_LBL_CHK_CLIP);
+        let chk_wh = make_checkbox("控制电视期间鼠标滚轮映射为上下方向键", sc(180.0), ID_CHK_WHEEL, ID_LBL_CHK_WHEEL);
+        let chk_int = make_checkbox("切电视时自动临时切为「仅电脑屏幕」（回 DP 还原）", sc(208.0), ID_CHK_AUTO_INT, ID_LBL_CHK_AUTO_INT);
+        let chk_as = make_checkbox("Windows 开机自动启动", sc(236.0), ID_CHK_AUTOSTART, ID_LBL_CHK_AUTOSTART);
 
         SendMessageW(chk_to, BM_SETCHECK, if auto_to { BST_CHECKED } else { BST_UNCHECKED } as WPARAM, 0);
+        SendMessageW(chk_edge, BM_SETCHECK, if edge_sw { BST_CHECKED } else { BST_UNCHECKED } as WPARAM, 0);
+        SendMessageW(chk_clip, BM_SETCHECK, if clip_sync { BST_CHECKED } else { BST_UNCHECKED } as WPARAM, 0);
         SendMessageW(chk_wh, BM_SETCHECK, if wheel_dp { BST_CHECKED } else { BST_UNCHECKED } as WPARAM, 0);
+        SendMessageW(chk_int, BM_SETCHECK, if auto_int { BST_CHECKED } else { BST_UNCHECKED } as WPARAM, 0);
         SendMessageW(chk_as, BM_SETCHECK, if is_autostart_enabled() { BST_CHECKED } else { BST_UNCHECKED } as WPARAM, 0);
 
-        make_ctrl("STATIC", &guide, 0, WS_BORDER, pad, sc(194.0), inner, sc(132.0), ID_LBL_GUIDE);
+        make_ctrl("STATIC", &guide, 0, WS_BORDER, pad, sc(272.0), inner, sc(150.0), ID_LBL_GUIDE);
 
         make_ctrl("BUTTON", "自定义快捷键...", 0, WS_TABSTOP, pad, ch - sc(46.0), sc(126.0), sc(32.0), ID_BTN_KEYMAP);
         make_ctrl("BUTTON", "保存", 0, BS_DEFPUSHBUTTON | WS_TABSTOP, cw - pad - sc(168.0), ch - sc(46.0), sc(78.0), sc(32.0), ID_BTN_SAVE);
@@ -286,7 +302,12 @@ unsafe extern "system" fn settings_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp
         WM_COMMAND => {
             let id = (wp & 0xFFFF) as i32;
             match id {
-                ID_LBL_CHK_TAKEOVER | ID_LBL_CHK_WHEEL | ID_LBL_CHK_AUTOSTART => {
+                ID_LBL_CHK_TAKEOVER
+                | ID_LBL_CHK_WHEEL
+                | ID_LBL_CHK_AUTOSTART
+                | ID_LBL_CHK_EDGE
+                | ID_LBL_CHK_CLIP
+                | ID_LBL_CHK_AUTO_INT => {
                     let chk_id = id - 10;
                     let chk = GetDlgItem(hwnd, chk_id);
                     if !chk.is_null() {
@@ -350,7 +371,10 @@ unsafe extern "system" fn settings_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp
                     let raw = get_edit_text(hwnd, ID_EDIT_ADDR);
                     let addr = AppConfig::normalize_address(&raw);
                     let auto_to = SendMessageW(GetDlgItem(hwnd, ID_CHK_TAKEOVER), BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
+                    let edge_sw = SendMessageW(GetDlgItem(hwnd, ID_CHK_EDGE), BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
+                    let clip_sync = SendMessageW(GetDlgItem(hwnd, ID_CHK_CLIP), BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
                     let wheel_dp = SendMessageW(GetDlgItem(hwnd, ID_CHK_WHEEL), BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
+                    let auto_int = SendMessageW(GetDlgItem(hwnd, ID_CHK_AUTO_INT), BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
                     let auto_start = SendMessageW(GetDlgItem(hwnd, ID_CHK_AUTOSTART), BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
 
                     let cb: Option<Box<dyn Fn()>> = SETTINGS_STATE.with(|c| {
@@ -362,7 +386,10 @@ unsafe extern "system" fn settings_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp
                                     st.dev.reset_jar_cache();
                                 }
                                 cfg.auto_takeover_on_tv = auto_to;
+                                cfg.edge_switch = edge_sw;
+                                cfg.clipboard_sync = clip_sync;
                                 cfg.wheel_as_dpad = wheel_dp;
+                                cfg.auto_internal_on_tv = auto_int;
                                 cfg.save();
                             }
                             set_autostart(auto_start);

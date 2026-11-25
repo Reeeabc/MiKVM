@@ -1,18 +1,20 @@
 use crate::config::{to_wide, AppConfig};
+use crate::display::visible_work_area_for_cursor;
 use crate::gdi::{apply_dark_control_theme, apply_dwm_dark_titlebar, ThemePalette};
 use crate::keymap::{
     is_modifier_vk, validate_chord, KeyAction, KeyChord, KeyMap, ACTION_COUNT, ALL_ACTIONS,
     MOD_ALT, MOD_CTRL, MOD_SHIFT,
 };
+use crate::takeover::current_mode;
 use std::cell::RefCell;
 use std::ptr;
 use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    CreateFontW, CreateSolidBrush, DeleteObject, FillRect, GetDC, GetDeviceCaps, ReleaseDC,
-    SetBkColor, SetTextColor, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET,
-    DEFAULT_PITCH, FF_DONTCARE, FW_NORMAL, HBRUSH, HFONT, LOGPIXELSX, OUT_DEFAULT_PRECIS,
+    CreateFontW, CreateSolidBrush, DeleteObject, FillRect, SetBkColor, SetTextColor,
+    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, FF_DONTCARE, FW_NORMAL,
+    HBRUSH, HFONT, OUT_DEFAULT_PRECIS,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -139,34 +141,30 @@ where
             RegisterClassW(&wc);
         });
 
-        let hdc = GetDC(ptr::null_mut());
-        let dpi = if !hdc.is_null() {
-            let d = GetDeviceCaps(hdc, LOGPIXELSX as i32);
-            ReleaseDC(ptr::null_mut(), hdc);
-            d
-        } else {
-            96
-        };
-        let s = (dpi as f32 / 96.0).max(1.0);
+        let tv_hint = cfg
+            .lock()
+            .map(|c| c.tv_monitor_hint.clone())
+            .unwrap_or_else(|_| "Mi Monitor".to_string());
+        let (wa, s) = visible_work_area_for_cursor(current_mode().is_session_active(), &tv_hint, true);
         let sc = |v: f32| (v * s).round() as i32;
 
-        let cw = sc(476.0);
-        let ch = sc(545.0);
+        let cw = sc(486.0);
+        let ch = sc(580.0);
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
         let mut wr = RECT { left: 0, top: 0, right: cw, bottom: ch };
         AdjustWindowRectEx(&mut wr, style, 0, 0);
         let ww = wr.right - wr.left;
         let wh = wr.bottom - wr.top;
-        let sw = GetSystemMetrics(SM_CXSCREEN);
-        let sh = GetSystemMetrics(SM_CYSCREEN);
+        let wx = wa.left + ((wa.right - wa.left) - ww) / 2;
+        let wy = wa.top + ((wa.bottom - wa.top) - wh) / 2;
 
         let hwnd = CreateWindowExW(
             WS_EX_TOPMOST,
             cls_w.as_ptr(),
             to_wide("自定义遥控快捷键 — MiKVM").as_ptr(),
             style,
-            (sw - ww) / 2,
-            (sh - wh) / 2,
+            wx,
+            wy,
             ww,
             wh,
             ptr::null_mut(),
@@ -278,13 +276,13 @@ where
 
         make_ctrl(
             "STATIC",
-            "提示：仅在接管电视期间生效，切回电脑 DP 自动注销零误触",
+            "提示：遥控快捷键仅在控制电视时生效；切焦点/回 DP 在多屏待命态同样可用",
             0,
             0,
             pad,
-            sc(449.0),
+            sc(482.0),
             inner,
-            sc(34.0),
+            sc(36.0),
             ID_LBL_MSG,
         );
 

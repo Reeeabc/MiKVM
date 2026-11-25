@@ -66,22 +66,24 @@ impl KeyChord {
 #[repr(usize)]
 pub enum KeyAction {
     ReturnDp = 0,
-    Back = 1,
-    Home = 2,
-    Menu = 3,
-    Voice = 4,
-    VolUp = 5,
-    VolDown = 6,
-    Mute = 7,
-    BrightnessUp = 8,
-    BrightnessDown = 9,
-    Power = 10,
+    ToggleFocus = 1,
+    Back = 2,
+    Home = 3,
+    Menu = 4,
+    Voice = 5,
+    VolUp = 6,
+    VolDown = 7,
+    Mute = 8,
+    BrightnessUp = 9,
+    BrightnessDown = 10,
+    Power = 11,
 }
 
-pub const ACTION_COUNT: usize = 11;
+pub const ACTION_COUNT: usize = 12;
 
 pub const ALL_ACTIONS: [KeyAction; ACTION_COUNT] = [
     KeyAction::ReturnDp,
+    KeyAction::ToggleFocus,
     KeyAction::Back,
     KeyAction::Home,
     KeyAction::Menu,
@@ -102,6 +104,7 @@ impl KeyAction {
     pub const fn ini_key(self) -> &'static str {
         match self {
             KeyAction::ReturnDp => "Key.ReturnDp",
+            KeyAction::ToggleFocus => "Key.ToggleFocus",
             KeyAction::Back => "Key.Back",
             KeyAction::Home => "Key.Home",
             KeyAction::Menu => "Key.Menu",
@@ -118,6 +121,7 @@ impl KeyAction {
     pub const fn label(self) -> &'static str {
         match self {
             KeyAction::ReturnDp => "切回电脑 DP",
+            KeyAction::ToggleFocus => "切换键鼠焦点 (PC↔电视)",
             KeyAction::Back => "返回 (Back)",
             KeyAction::Home => "主页 (Home)",
             KeyAction::Menu => "菜单 (≡)",
@@ -145,6 +149,10 @@ impl KeyAction {
         matches!(self, KeyAction::ReturnDp)
     }
 
+    pub const fn is_standby_global(self) -> bool {
+        matches!(self, KeyAction::ReturnDp | KeyAction::ToggleFocus)
+    }
+
     pub const fn android_keycode(self) -> Option<i32> {
         match self {
             KeyAction::Back => Some(4),
@@ -155,6 +163,7 @@ impl KeyAction {
             KeyAction::Mute => Some(164),
             KeyAction::Power => Some(26),
             KeyAction::ReturnDp
+            | KeyAction::ToggleFocus
             | KeyAction::Voice
             | KeyAction::BrightnessUp
             | KeyAction::BrightnessDown => None,
@@ -177,6 +186,7 @@ impl KeyMap {
     pub fn preset_1() -> Self {
         let mut b = [None; ACTION_COUNT];
         b[KeyAction::ReturnDp.index()] = Some(KeyChord::new(MOD_CTRL | MOD_ALT, b'D' as u16));
+        b[KeyAction::ToggleFocus.index()] = Some(KeyChord::new(MOD_CTRL | MOD_ALT, b'S' as u16));
         b[KeyAction::Back.index()] = Some(KeyChord::new(0, VK_ESCAPE));
         b[KeyAction::Home.index()] = Some(KeyChord::new(0, VK_HOME));
         b[KeyAction::Menu.index()] = Some(KeyChord::new(0, VK_F12));
@@ -193,6 +203,7 @@ impl KeyMap {
     pub fn preset_2() -> Self {
         let mut b = [None; ACTION_COUNT];
         b[KeyAction::ReturnDp.index()] = Some(KeyChord::new(MOD_CTRL | MOD_ALT, b'D' as u16));
+        b[KeyAction::ToggleFocus.index()] = Some(KeyChord::new(MOD_CTRL | MOD_ALT, b'S' as u16));
         b[KeyAction::Back.index()] = Some(KeyChord::new(0, VK_ESCAPE));
         b[KeyAction::Home.index()] = Some(KeyChord::new(MOD_ALT, b'H' as u16));
         b[KeyAction::Menu.index()] = Some(KeyChord::new(MOD_ALT, b'M' as u16));
@@ -246,14 +257,22 @@ impl KeyMap {
             .unwrap_or_else(|| "Ctrl+Alt+D".to_string())
     }
 
+    pub fn toggle_focus_label(&self) -> String {
+        self.get(KeyAction::ToggleFocus)
+            .map(|c| c.format())
+            .unwrap_or_else(|| "Ctrl+Alt+S".to_string())
+    }
+
     pub fn summary_text(&self) -> String {
         let f = |a: KeyAction| self.format_action(a);
         format!(
-            "当前遥控快捷键（仅接管电视期间生效，回电脑自动注销）：\r\n\
+            "当前遥控快捷键（遥控键仅控制电视时生效，切焦点/回DP多屏待命也可用）：\r\n\
+             • 切焦点 (PC↔电视) / 切回电脑 DP：{} / {}\r\n\
              • 返回 / 主页 / 菜单 / 语音：{} / {} / {} / {}\r\n\
              • 音量 + / - / 静音：{} / {} / {}\r\n\
-             • 亮度 + / -：{} / {}\r\n\
-             • 待机息屏 / 切回电脑 DP：{} / {}",
+             • 亮度 + / - / 息屏：{} / {} / {}",
+            f(KeyAction::ToggleFocus),
+            f(KeyAction::ReturnDp),
             f(KeyAction::Back),
             f(KeyAction::Home),
             f(KeyAction::Menu),
@@ -264,7 +283,6 @@ impl KeyMap {
             f(KeyAction::BrightnessUp),
             f(KeyAction::BrightnessDown),
             f(KeyAction::Power),
-            f(KeyAction::ReturnDp),
         )
     }
 }

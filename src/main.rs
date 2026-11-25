@@ -1,12 +1,14 @@
 #![windows_subsystem = "windows"]
 
 mod adb;
+mod clipboard;
 mod config;
+mod display;
 mod flyout;
 mod gdi;
-mod ime;
 mod keymap;
 mod keymap_ui;
+mod scrcpy_proto;
 mod settings_ui;
 mod takeover;
 
@@ -15,17 +17,20 @@ use crate::config::{
     exe_dir, from_wide, is_system_dark_mode, resolve_asset_dir, resolve_scrcpy_dir, to_wide,
     AppConfig, DeviceStatus, SignalSource,
 };
+use crate::display::{
+    parse_lid_power_broadcast, register_lid_notification, unregister_lid_notification,
+};
 use crate::flyout::{
     create_flyout, hide_flyout, is_flyout_visible, refresh_flyout_theme,
     set_flyout_optimistic_source, set_flyout_refreshing, show_flyout_near_tray,
     update_flyout_status, was_just_hidden, FlyoutAction,
 };
 use crate::gdi::{create_tray_icon, GdipGuard};
-use crate::ime::{find_english_hkl, restore_saved_ime, SavedImeState};
 use crate::settings_ui::show_settings_window;
 use crate::takeover::{
-    TakeoverSession, WM_DP_RETURNED, WM_RESTORE_IME_RETRY, WM_SCRCPY_EXITED, WM_SCRCPY_READY,
-    WM_TRIGGER_RETURN_DP,
+    current_mode, handle_raw_input, TakeoverMode, TakeoverSession, WM_CONTROL_EXITED,
+    WM_CONTROL_READY, WM_DP_RETURNED, WM_EDGE_ENTER_TV, WM_TRIGGER_RETURN_DP,
+    WM_TRIGGER_TOGGLE_FOCUS, WM_TV_CLIPBOARD, WM_TV_EDGE_EXIT,
 };
 use std::cell::RefCell;
 use std::ptr;
@@ -36,6 +41,7 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::Power::HPOWERNOTIFY;
 
 #[link(name = "kernel32")]
 extern "system" {
@@ -60,14 +66,14 @@ const WM_TRAY_ICON: u32 = WM_APP + 1;
 const WM_STATUS_UPDATED: u32 = WM_APP + 2;
 const WM_SOURCE_OPTIMISTIC: u32 = WM_APP + 3;
 const WM_SHOW_BALLOON: u32 = WM_APP + 4;
-const TIMER_IME_GUARD: usize = 501;
 
 const IDM_OPEN: usize = 1001;
 const IDM_TV: usize = 1002;
 const IDM_DP: usize = 1003;
-const IDM_TOGGLE_CTRL: usize = 1004;
-const IDM_SETTINGS: usize = 1005;
-const IDM_EXIT: usize = 1006;
+const IDM_TOGGLE_FOCUS: usize = 1004;
+const IDM_TOGGLE_CTRL: usize = 1005;
+const IDM_SETTINGS: usize = 1006;
+const IDM_EXIT: usize = 1007;
 
 static BUSY: AtomicBool = AtomicBool::new(false);
 
@@ -78,6 +84,7 @@ struct AppHost {
     takeover: Arc<Mutex<TakeoverSession>>,
     idle_icon: HICON,
     active_icon: HICON,
+    lid_notify: HPOWERNOTIFY,
 }
 
 thread_local! {
@@ -152,14 +159,6 @@ fn handle_source_click(src: SignalSource) {
         return;
     }
     if src == SignalSource::TvSystem {
-        with_host(|h| {
-            let auto_to = h.cfg.lock().map(|c| c.auto_takeover_on_tv).unwrap_or(true);
-            if auto_to {
-                if let Ok(mut to) = h.takeover.lock() {
-                    to.save_ime_before_switch();
-                }
-            }
-        });
         hide_flyout();
     }
 
@@ -179,34 +178,53 @@ fn handle_source_click(src: SignalSource) {
         if let Ok(mut to) = takeover.lock() {
             to.stop();
         }
-        update_tray_takeover_visual(false);
+        update_tray_visual();
     }
 
     std::thread::spawn(move || {
         let (addr, auto_to, dp, h1, h2) = cfg
             .lock()
-            .map(|c| (c.tv_address.clone(), c.auto_takeover_on_tv, c.dp_input, c.hdmi1_input, c.hdmi2_input))
+            .map(|c| {
+                (
+                    c.tv_address.clone(),
+                    c.auto_takeover_on_tv,
+                    c.dp_input,
+                    c.hdmi1_input,
+                    c.hdmi2_input,
+                )
+            })
             .unwrap_or_else(|_| (String::new(), true, 29, 23, 24));
 
         if !dev.ensure_connected() {
             let msg = Box::into_raw(Box::new(format!("无法连接到 {}", addr))) as LPARAM;
-            unsafe { PostMessageW(hwnd as HWND, WM_SHOW_BALLOON, 0, msg); }
+            unsafe {
+                PostMessageW(hwnd as HWND, WM_SHOW_BALLOON, 0, msg);
+            }
             BUSY.store(false, Ordering::Release);
             return;
         }
 
         if src == SignalSource::TvSystem {
             if auto_to {
-                let res = takeover.lock().map(|to| to.start_scrcpy_blocking());
+                let res = takeover.lock().map(|to| to.start_control_blocking());
                 if let Ok(Err(err_msg)) = res {
                     let msg = Box::into_raw(Box::new(err_msg)) as LPARAM;
-                    unsafe { PostMessageW(hwnd as HWND, WM_SHOW_BALLOON, 0, msg); }
+                    unsafe {
+                        PostMessageW(hwnd as HWND, WM_SHOW_BALLOON, 0, msg);
+                    }
                     BUSY.store(false, Ordering::Release);
                     return;
                 }
             }
             let _ = dev.switch_to_tv_desktop();
-            unsafe { PostMessageW(hwnd as HWND, WM_SOURCE_OPTIMISTIC, src as WPARAM, if auto_to { 1 } else { 0 }); }
+            unsafe {
+                PostMessageW(
+                    hwnd as HWND,
+                    WM_SOURCE_OPTIMISTIC,
+                    src as WPARAM,
+                    if auto_to { 1 } else { 0 },
+                );
+            }
             if auto_to {
                 if let Ok(to) = takeover.lock() {
                     to.start_dp_return_watcher();
@@ -219,7 +237,9 @@ fn handle_source_click(src: SignalSource) {
                 _ => dp,
             };
             let _ = dev.switch_to_external(input_id);
-            unsafe { PostMessageW(hwnd as HWND, WM_SOURCE_OPTIMISTIC, src as WPARAM, 0); }
+            unsafe {
+                PostMessageW(hwnd as HWND, WM_SOURCE_OPTIMISTIC, src as WPARAM, 0);
+            }
         }
         BUSY.store(false, Ordering::Release);
     });
@@ -230,9 +250,6 @@ fn start_control_only() {
         return;
     }
     let Some((hwnd, dev, takeover)) = with_host(|h| {
-        if let Ok(mut to) = h.takeover.lock() {
-            to.save_ime_before_switch();
-        }
         (h.hwnd as usize, Arc::clone(&h.dev), Arc::clone(&h.takeover))
     }) else {
         BUSY.store(false, Ordering::Release);
@@ -241,37 +258,47 @@ fn start_control_only() {
 
     std::thread::spawn(move || {
         if dev.ensure_connected() {
-            if let Ok(Err(e)) = takeover.lock().map(|to| to.start_scrcpy_blocking()) {
+            if let Ok(Err(e)) = takeover.lock().map(|to| to.start_control_blocking()) {
                 let msg = Box::into_raw(Box::new(e)) as LPARAM;
-                unsafe { PostMessageW(hwnd as HWND, WM_SHOW_BALLOON, 0, msg); }
+                unsafe {
+                    PostMessageW(hwnd as HWND, WM_SHOW_BALLOON, 0, msg);
+                }
             }
         }
         BUSY.store(false, Ordering::Release);
     });
 }
 
-fn update_tray_takeover_visual(active: bool) {
+fn update_tray_visual() {
+    let mode = current_mode();
     let info = with_host(|h| {
-        let dp_key = h
+        let (dp_key, focus_key) = h
             .cfg
             .lock()
-            .map(|c| c.keymap.return_dp_label())
-            .unwrap_or_else(|_| "Ctrl+Alt+D".to_string());
-        (h.hwnd, if active { h.active_icon } else { h.idle_icon }, dp_key)
-    });
-    if let Some((hwnd, icon, dp_key)) = info {
-        let tip = if active {
-            format!("MiKVM 键鼠接管中 ({} 切回电脑 DP)", dp_key)
+            .map(|c| (c.keymap.return_dp_label(), c.keymap.toggle_focus_label()))
+            .unwrap_or_else(|_| ("Ctrl+Alt+D".to_string(), "Ctrl+Alt+S".to_string()));
+        let icon = if mode.is_tv_capturing() {
+            h.active_icon
         } else {
-            "MiKVM — 信号源 / 背光 / 键鼠控制".to_string()
+            h.idle_icon
+        };
+        (h.hwnd, icon, dp_key, focus_key)
+    });
+    if let Some((hwnd, icon, dp_key, focus_key)) = info {
+        let tip = match mode {
+            TakeoverMode::TvFocused => {
+                format!("MiKVM 控制电视中 ({} 切电脑 / {} 回DP)", focus_key, dp_key)
+            }
+            TakeoverMode::TvLocked => {
+                format!("MiKVM 单屏独占电视 ({} 切回电脑 DP)", dp_key)
+            }
+            TakeoverMode::TvStandby => {
+                format!("MiKVM 电视待命 · 焦点在电脑 (滑边或 {} 切入)", focus_key)
+            }
+            TakeoverMode::Idle => "MiKVM — 信号源 / 背光 / 多屏键鼠控制".to_string(),
         };
         unsafe {
             set_tray_icon_state(hwnd, icon, &tip, false);
-            if active {
-                SetTimer(hwnd, TIMER_IME_GUARD, 150, None);
-            } else {
-                KillTimer(hwnd, TIMER_IME_GUARD);
-            }
         }
     }
 }
@@ -284,7 +311,18 @@ fn toggle_flyout_panel() {
     if was_just_hidden() {
         return;
     }
-    show_flyout_near_tray();
+    let (tv_hint, lid_open) = with_host(|h| {
+        let hint = h
+            .cfg
+            .lock()
+            .map(|c| c.tv_monitor_hint.clone())
+            .unwrap_or_else(|_| "Mi Monitor".to_string());
+        let lid = h.takeover.lock().map(|t| t.is_lid_open()).unwrap_or(true);
+        (hint, lid)
+    })
+    .unwrap_or_else(|| ("Mi Monitor".to_string(), true));
+
+    show_flyout_near_tray(current_mode().is_session_active(), &tv_hint, lid_open);
     trigger_refresh(true);
 }
 
@@ -295,27 +333,31 @@ fn open_settings() {
         return;
     };
     show_settings_window(cfg, dev, move || {
-        let running = if let Ok(mut to) = takeover.lock() {
+        if let Ok(mut to) = takeover.lock() {
             to.sync_config();
-            to.is_running()
-        } else {
-            false
-        };
-        if running {
-            update_tray_takeover_visual(true);
         }
+        update_tray_visual();
     });
 }
 
 fn exit_app() {
-    let info = with_host(|h| (h.hwnd, h.idle_icon, h.active_icon, Arc::clone(&h.takeover), Arc::clone(&h.dev)));
-    if let Some((hwnd, idle_icon, active_icon, takeover, dev)) = info {
+    let info = with_host(|h| {
+        (
+            h.hwnd,
+            h.idle_icon,
+            h.active_icon,
+            h.lid_notify,
+            Arc::clone(&h.takeover),
+            Arc::clone(&h.dev),
+        )
+    });
+    if let Some((hwnd, idle_icon, active_icon, lid_notify, takeover, dev)) = info {
         if let Ok(mut to) = takeover.lock() {
             to.stop();
         }
         dev.stop_daemon_now();
+        unregister_lid_notification(lid_notify);
         unsafe {
-            KillTimer(hwnd, TIMER_IME_GUARD);
             remove_tray_icon(hwnd);
             DestroyIcon(idle_icon);
             DestroyIcon(active_icon);
@@ -325,20 +367,30 @@ fn exit_app() {
 }
 
 unsafe fn show_right_click_menu(hwnd: HWND) {
-    let running = with_host(|h| h.takeover.lock().map(|t| t.is_running()).unwrap_or(false)).unwrap_or(false);
+    let mode = current_mode();
+    let running = with_host(|h| h.takeover.lock().map(|t| t.is_running()).unwrap_or(false))
+        .unwrap_or(false);
     let menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, IDM_OPEN, to_wide("打开控制面板").as_ptr());
     AppendMenuW(menu, MF_SEPARATOR, 0, ptr::null());
     AppendMenuW(menu, MF_STRING, IDM_TV, to_wide("切换到电视系统").as_ptr());
     AppendMenuW(menu, MF_STRING, IDM_DP, to_wide("切回电脑 DP").as_ptr());
+    if mode == TakeoverMode::TvFocused || mode == TakeoverMode::TvStandby {
+        let focus_lbl = if mode == TakeoverMode::TvFocused {
+            "切回电脑焦点 (保持电视画面)"
+        } else {
+            "切入电视控制"
+        };
+        AppendMenuW(menu, MF_STRING, IDM_TOGGLE_FOCUS, to_wide(focus_lbl).as_ptr());
+    }
     AppendMenuW(
         menu,
         MF_STRING,
         IDM_TOGGLE_CTRL,
-        to_wide(if running { "停止键鼠接管" } else { "仅开启键鼠接管" }).as_ptr(),
+        to_wide(if running { "停止键鼠通道" } else { "仅开启直连键鼠控制" }).as_ptr(),
     );
     AppendMenuW(menu, MF_SEPARATOR, 0, ptr::null());
-    AppendMenuW(menu, MF_STRING, IDM_SETTINGS, to_wide("ADB 设置...").as_ptr());
+    AppendMenuW(menu, MF_STRING, IDM_SETTINGS, to_wide("ADB 与多屏设置...").as_ptr());
     AppendMenuW(menu, MF_STRING, IDM_EXIT, to_wide("退出").as_ptr());
 
     let mut pt: POINT = std::mem::zeroed();
@@ -360,6 +412,65 @@ fn source_from_wparam(wp: WPARAM) -> SignalSource {
 
 unsafe extern "system" fn host_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
+        WM_INPUT => {
+            handle_raw_input(lp);
+            0
+        }
+        WM_DISPLAYCHANGE => {
+            let to_opt = with_host(|h| Arc::clone(&h.takeover));
+            if let Some(to) = to_opt {
+                if let Ok(mut g) = to.lock() {
+                    g.on_display_changed();
+                }
+            }
+            update_tray_visual();
+            0
+        }
+        WM_POWERBROADCAST => {
+            if let Some(lid_open) = parse_lid_power_broadcast(msg, wp, lp) {
+                let to_opt = with_host(|h| Arc::clone(&h.takeover));
+                if let Some(to) = to_opt {
+                    if let Ok(mut g) = to.lock() {
+                        g.on_lid_state_changed(lid_open);
+                    }
+                }
+                update_tray_visual();
+            }
+            1
+        }
+        WM_SETTINGCHANGE => {
+            let is_theme_change = if lp == 0 {
+                true
+            } else {
+                let p = lp as *const u16;
+                let mut len = 0usize;
+                while len < 64 && *p.add(len) != 0 {
+                    len += 1;
+                }
+                let slice = std::slice::from_raw_parts(p, len);
+                from_wide(slice).eq_ignore_ascii_case("ImmersiveColorSet")
+            };
+            if is_theme_change {
+                let dark_tb = is_system_dark_mode();
+                let new_idle = create_tray_icon(false, dark_tb);
+                let new_active = create_tray_icon(true, dark_tb);
+                let swapped = with_host(|h| {
+                    let old_idle = std::mem::replace(&mut h.idle_icon, new_idle);
+                    let old_active = std::mem::replace(&mut h.active_icon, new_active);
+                    (old_idle, old_active)
+                });
+                if let Some((old_idle, old_active)) = swapped {
+                    update_tray_visual();
+                    DestroyIcon(old_idle);
+                    DestroyIcon(old_active);
+                } else {
+                    DestroyIcon(new_idle);
+                    DestroyIcon(new_active);
+                }
+                refresh_flyout_theme();
+            }
+            0
+        }
         WM_TRAY_ICON => {
             let ev = (lp & 0xFFFF) as u32;
             if ev == WM_LBUTTONUP {
@@ -376,15 +487,28 @@ unsafe extern "system" fn host_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                 IDM_OPEN => toggle_flyout_panel(),
                 IDM_TV => handle_source_click(SignalSource::TvSystem),
                 IDM_DP => handle_source_click(SignalSource::Dp),
+                IDM_TOGGLE_FOCUS => {
+                    let to_opt = with_host(|h| Arc::clone(&h.takeover));
+                    if let Some(to) = to_opt {
+                        if let Ok(mut g) = to.lock() {
+                            g.toggle_focus_ui();
+                        }
+                    }
+                    update_tray_visual();
+                }
                 IDM_TOGGLE_CTRL => {
-                    let running = with_host(|h| h.takeover.lock().map(|t| t.is_running()).unwrap_or(false)).unwrap_or(false);
+                    let to_opt = with_host(|h| Arc::clone(&h.takeover));
+                    let running = to_opt
+                        .as_ref()
+                        .and_then(|t| t.lock().ok().map(|g| g.is_running()))
+                        .unwrap_or(false);
                     if running {
-                        with_host(|h| {
-                            if let Ok(mut to) = h.takeover.lock() {
-                                to.stop();
+                        if let Some(to) = to_opt {
+                            if let Ok(mut g) = to.lock() {
+                                g.stop();
                             }
-                        });
-                        update_tray_takeover_visual(false);
+                        }
+                        update_tray_visual();
                     } else {
                         start_control_only();
                     }
@@ -399,65 +523,89 @@ unsafe extern "system" fn host_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             handle_source_click(SignalSource::Dp);
             0
         }
-        WM_TIMER => {
-            if wp == TIMER_IME_GUARD {
-                with_host(|h| {
-                    if let Ok(to) = h.takeover.lock() {
-                        to.on_ime_guard_tick();
+        WM_TRIGGER_TOGGLE_FOCUS => {
+            let to_opt = with_host(|h| Arc::clone(&h.takeover));
+            if let Some(to) = to_opt {
+                if let Ok(mut g) = to.lock() {
+                    g.toggle_focus_ui();
+                }
+            }
+            update_tray_visual();
+            0
+        }
+        WM_EDGE_ENTER_TV => {
+            let to_opt = with_host(|h| Arc::clone(&h.takeover));
+            if let Some(to) = to_opt {
+                if let Ok(mut g) = to.lock() {
+                    g.on_edge_enter_tv_ui();
+                }
+            }
+            update_tray_visual();
+            0
+        }
+        WM_TV_EDGE_EXIT => {
+            let to_opt = with_host(|h| Arc::clone(&h.takeover));
+            if let Some(to) = to_opt {
+                if let Ok(mut g) = to.lock() {
+                    g.on_tv_edge_exit_ui(wp);
+                }
+            }
+            update_tray_visual();
+            0
+        }
+        WM_TV_CLIPBOARD => {
+            if lp != 0 {
+                let text = Box::from_raw(lp as *mut String);
+                let to_opt = with_host(|h| Arc::clone(&h.takeover));
+                if let Some(to) = to_opt {
+                    if let Ok(mut g) = to.lock() {
+                        g.on_tv_clipboard_ui(*text);
                     }
-                });
+                }
             }
             0
         }
-        WM_SCRCPY_READY => {
-            let scrcpy_hwnd = wp as HWND;
-            with_host(|h| {
-                if let Ok(mut to) = h.takeover.lock() {
-                    to.on_scrcpy_ready_ui(scrcpy_hwnd);
+        WM_CONTROL_READY => {
+            let to_opt = with_host(|h| Arc::clone(&h.takeover));
+            if let Some(to) = to_opt {
+                if let Ok(mut g) = to.lock() {
+                    g.on_control_ready_ui();
                 }
-            });
-            update_tray_takeover_visual(true);
+            }
+            update_tray_visual();
             0
         }
-        WM_SCRCPY_EXITED => {
-            with_host(|h| {
-                if let Ok(mut to) = h.takeover.lock() {
-                    to.stop();
+        WM_CONTROL_EXITED => {
+            let to_opt = with_host(|h| Arc::clone(&h.takeover));
+            if let Some(to) = to_opt {
+                if let Ok(mut g) = to.lock() {
+                    g.stop();
                 }
-            });
-            update_tray_takeover_visual(false);
+            }
+            update_tray_visual();
             0
         }
         WM_DP_RETURNED => {
-            let addr = with_host(|h| {
-                if let Ok(mut to) = h.takeover.lock() {
-                    to.stop();
+            let info = with_host(|h| {
+                let addr = h.cfg.lock().map(|c| c.tv_address.clone()).unwrap_or_default();
+                (Arc::clone(&h.takeover), addr)
+            });
+            if let Some((to, addr)) = info {
+                if let Ok(mut g) = to.lock() {
+                    g.stop();
                 }
-                h.cfg.lock().map(|c| c.tv_address.clone()).unwrap_or_default()
-            })
-            .unwrap_or_default();
-            update_tray_takeover_visual(false);
-            set_flyout_optimistic_source(SignalSource::Dp, &addr, false);
-            trigger_refresh(true);
-            0
-        }
-        WM_RESTORE_IME_RETRY => {
-            if lp != 0 {
-                let saved = Box::from_raw(lp as *mut SavedImeState);
-                restore_saved_ime(&saved);
+                update_tray_visual();
+                set_flyout_optimistic_source(SignalSource::Dp, &addr, TakeoverMode::Idle);
+                trigger_refresh(true);
             }
             0
         }
         WM_STATUS_UPDATED => {
             if lp != 0 {
                 let ds = Box::from_raw(lp as *mut DeviceStatus);
-                let (addr, running) = with_host(|h| {
-                    let a = h.cfg.lock().map(|c| c.tv_address.clone()).unwrap_or_default();
-                    let r = h.takeover.lock().map(|t| t.is_running()).unwrap_or(false);
-                    (a, r)
-                })
-                .unwrap_or_default();
-                update_flyout_status(&ds, &addr, running);
+                let addr = with_host(|h| h.cfg.lock().map(|c| c.tv_address.clone()).unwrap_or_default())
+                    .unwrap_or_default();
+                update_flyout_status(&ds, &addr, current_mode());
             }
             0
         }
@@ -466,47 +614,19 @@ unsafe extern "system" fn host_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             let active = lp != 0;
             let addr = with_host(|h| h.cfg.lock().map(|c| c.tv_address.clone()).unwrap_or_default())
                 .unwrap_or_default();
-            set_flyout_optimistic_source(src, &addr, active);
+            let mode = if active {
+                let cur = current_mode();
+                if cur.is_session_active() { cur } else { TakeoverMode::TvFocused }
+            } else {
+                TakeoverMode::Idle
+            };
+            set_flyout_optimistic_source(src, &addr, mode);
             0
         }
         WM_SHOW_BALLOON => {
             if lp != 0 {
                 let text = Box::from_raw(lp as *mut String);
                 show_tray_balloon(hwnd, "MiKVM", &text);
-            }
-            0
-        }
-        WM_SETTINGCHANGE => {
-            let is_theme_change = if lp == 0 {
-                true
-            } else {
-                let ptr = lp as *const u16;
-                let mut len = 0usize;
-                while len < 64 && *ptr.add(len) != 0 {
-                    len += 1;
-                }
-                let slice = std::slice::from_raw_parts(ptr, len);
-                from_wide(slice).eq_ignore_ascii_case("ImmersiveColorSet")
-            };
-            if is_theme_change {
-                let dark_tb = is_system_dark_mode();
-                let new_idle = create_tray_icon(false, dark_tb);
-                let new_active = create_tray_icon(true, dark_tb);
-                let swapped = with_host(|h| {
-                    let old_idle = std::mem::replace(&mut h.idle_icon, new_idle);
-                    let old_active = std::mem::replace(&mut h.active_icon, new_active);
-                    let running = h.takeover.lock().map(|t| t.is_running()).unwrap_or(false);
-                    (old_idle, old_active, running)
-                });
-                if let Some((old_idle, old_active, running)) = swapped {
-                    update_tray_takeover_visual(running);
-                    DestroyIcon(old_idle);
-                    DestroyIcon(old_active);
-                } else {
-                    DestroyIcon(new_idle);
-                    DestroyIcon(new_active);
-                }
-                refresh_flyout_theme();
             }
             0
         }
@@ -576,16 +696,15 @@ fn main() {
         )
     };
 
+    let lid_notify = register_lid_notification(host_hwnd);
     let dark_tb = is_system_dark_mode();
     let idle_icon = create_tray_icon(false, dark_tb);
     let active_icon = create_tray_icon(true, dark_tb);
-    let english_hkl = find_english_hkl();
     let takeover = Arc::new(Mutex::new(TakeoverSession::new(
         scrcpy_dir,
         Arc::clone(&cfg),
         Arc::clone(&dev),
         host_hwnd,
-        english_hkl,
     )));
 
     APP_HOST.with(|c| {
@@ -596,6 +715,7 @@ fn main() {
             takeover: Arc::clone(&takeover),
             idle_icon,
             active_icon,
+            lid_notify,
         });
     });
 
@@ -624,7 +744,12 @@ fn main() {
     });
 
     unsafe {
-        set_tray_icon_state(host_hwnd, idle_icon, "MiKVM — 信号源 / 背光 / 键鼠控制", true);
+        set_tray_icon_state(
+            host_hwnd,
+            idle_icon,
+            "MiKVM — 信号源 / 背光 / 多屏键鼠控制",
+            true,
+        );
 
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, ptr::null_mut(), 0, 0) > 0 {

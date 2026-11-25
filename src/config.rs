@@ -1,3 +1,4 @@
+use crate::display::EdgeSide;
 use crate::keymap::{KeyChord, KeyMap, ALL_ACTIONS};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -88,6 +89,11 @@ pub struct AppConfig {
     pub tv_address: String,
     pub auto_takeover_on_tv: bool,
     pub wheel_as_dpad: bool,
+    pub edge_switch: bool,
+    pub clipboard_sync: bool,
+    pub auto_internal_on_tv: bool,
+    pub tv_monitor_hint: String,
+    pub tv_edge_side: EdgeSide,
     pub dp_input: i32,
     pub hdmi1_input: i32,
     pub hdmi2_input: i32,
@@ -101,6 +107,11 @@ impl AppConfig {
             tv_address: "192.168.1.200:5555".to_string(),
             auto_takeover_on_tv: true,
             wheel_as_dpad: true,
+            edge_switch: true,
+            clipboard_sync: true,
+            auto_internal_on_tv: false,
+            tv_monitor_hint: "Mi Monitor".to_string(),
+            tv_edge_side: EdgeSide::Left,
             dp_input: 29,
             hdmi1_input: 23,
             hdmi2_input: 24,
@@ -128,6 +139,24 @@ impl AppConfig {
                     } else if k.eq_ignore_ascii_case("WheelAsDpad") {
                         if let Ok(b) = v.to_ascii_lowercase().parse::<bool>() {
                             cfg.wheel_as_dpad = b;
+                        }
+                    } else if k.eq_ignore_ascii_case("EdgeSwitch") {
+                        if let Ok(b) = v.to_ascii_lowercase().parse::<bool>() {
+                            cfg.edge_switch = b;
+                        }
+                    } else if k.eq_ignore_ascii_case("ClipboardSync") {
+                        if let Ok(b) = v.to_ascii_lowercase().parse::<bool>() {
+                            cfg.clipboard_sync = b;
+                        }
+                    } else if k.eq_ignore_ascii_case("AutoInternalOnTv") {
+                        if let Ok(b) = v.to_ascii_lowercase().parse::<bool>() {
+                            cfg.auto_internal_on_tv = b;
+                        }
+                    } else if k.eq_ignore_ascii_case("TvMonitorHint") {
+                        cfg.tv_monitor_hint = v.to_string();
+                    } else if k.eq_ignore_ascii_case("TvEdgeSide") {
+                        if let Some(side) = EdgeSide::parse(v) {
+                            cfg.tv_edge_side = side;
                         }
                     } else if k.eq_ignore_ascii_case("DpInput") {
                         if let Ok(n) = v.parse::<i32>() {
@@ -164,13 +193,23 @@ impl AppConfig {
              TvAddress={}\r\n\
              AutoTakeoverOnTv={}\r\n\
              WheelAsDpad={}\r\n\
+             EdgeSwitch={}\r\n\
+             ClipboardSync={}\r\n\
+             AutoInternalOnTv={}\r\n\
+             TvMonitorHint={}\r\n\
+             TvEdgeSide={}\r\n\
              DpInput={}\r\n\
              Hdmi1Input={}\r\n\
              Hdmi2Input={}\r\n\
-             # 自定义遥控快捷键（留空表示禁用，仅接管电视期间生效）\r\n",
+             # 自定义遥控快捷键（留空表示禁用）\r\n",
             self.tv_address,
             if self.auto_takeover_on_tv { "True" } else { "False" },
             if self.wheel_as_dpad { "True" } else { "False" },
+            if self.edge_switch { "True" } else { "False" },
+            if self.clipboard_sync { "True" } else { "False" },
+            if self.auto_internal_on_tv { "True" } else { "False" },
+            self.tv_monitor_hint,
+            self.tv_edge_side.as_str(),
             self.dp_input,
             self.hdmi1_input,
             self.hdmi2_input
@@ -237,10 +276,12 @@ pub fn resolve_scrcpy_dir(base: &Path) -> PathBuf {
             return candidate;
         }
     }
-    // Fallback: auto-discover scrcpy.exe / adb.exe from system PATH (e.g. winget / scoop)
+    // Fallback: auto-discover scrcpy-server / adb.exe from system PATH (e.g. winget / scoop)
     if let Ok(path_var) = std::env::var("PATH") {
         for dir in std::env::split_paths(&path_var) {
-            if dir.join("scrcpy.exe").exists() && dir.join("adb.exe").exists() {
+            if (dir.join("scrcpy-server").exists() || dir.join("scrcpy.exe").exists())
+                && dir.join("adb.exe").exists()
+            {
                 return dir;
             }
         }
