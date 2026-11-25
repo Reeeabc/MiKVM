@@ -1,14 +1,15 @@
 use crate::adb::DeviceController;
 use crate::config::{from_wide, is_autostart_enabled, set_autostart, to_wide, AppConfig};
+use crate::gdi::{apply_dark_control_theme, apply_dwm_dark_titlebar, ThemePalette};
 use crate::keymap_ui::show_keymap_window;
 use std::cell::RefCell;
 use std::ptr;
 use std::sync::{Arc, Mutex};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    CreateFontW, CreateSolidBrush, DeleteObject, GetDC, GetDeviceCaps, ReleaseDC, SetBkColor,
-    SetTextColor, CLEARTYPE_QUALITY, DEFAULT_CHARSET, DEFAULT_PITCH, FF_DONTCARE, FW_NORMAL,
-    HBRUSH, HFONT, LOGPIXELSX, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+    CreateFontW, CreateSolidBrush, DeleteObject, FillRect, GetDC, GetDeviceCaps, ReleaseDC,
+    SetBkColor, SetTextColor, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET,
+    DEFAULT_PITCH, FF_DONTCARE, FW_NORMAL, HBRUSH, HFONT, LOGPIXELSX, OUT_DEFAULT_PRECIS,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::{BST_CHECKED, BST_UNCHECKED};
@@ -25,6 +26,9 @@ const ID_BTN_SAVE: i32 = 207;
 const ID_BTN_CANCEL: i32 = 208;
 const ID_BTN_KEYMAP: i32 = 209;
 const ID_LBL_GUIDE: i32 = 210;
+const ID_LBL_CHK_TAKEOVER: i32 = 214;
+const ID_LBL_CHK_WHEEL: i32 = 215;
+const ID_LBL_CHK_AUTOSTART: i32 = 216;
 const WM_TEST_DONE: u32 = WM_APP + 50;
 
 const BM_GETCHECK: u32 = 0x00F0;
@@ -32,11 +36,14 @@ const BM_SETCHECK: u32 = 0x00F1;
 const BS_AUTOCHECKBOX: u32 = 0x0003;
 const BS_DEFPUSHBUTTON: u32 = 0x0001;
 const ES_AUTOHSCROLL: u32 = 0x0080;
+const SS_NOTIFY: u32 = 0x0100;
 
 struct SettingsState {
     hwnd: HWND,
     font: HFONT,
+    palette: ThemePalette,
     bg_brush: HBRUSH,
+    edit_brush: HBRUSH,
     cfg: Arc<Mutex<AppConfig>>,
     dev: Arc<DeviceController>,
     on_saved: Option<Box<dyn Fn()>>,
@@ -62,12 +69,14 @@ where
     }
 
     unsafe {
+        let pal = ThemePalette::current();
         let hinst = GetModuleHandleW(ptr::null());
         let cls_w = to_wide(SETTINGS_CLASS);
-        let bg_brush = CreateSolidBrush(0x00F9F6F5); // BGR of #F5F6F9
+        let bg_brush = CreateSolidBrush(pal.win32_bg_bgr);
+        let edit_brush = CreateSolidBrush(pal.win32_edit_bg_bgr);
         static CLASS_REG: std::sync::Once = std::sync::Once::new();
         CLASS_REG.call_once(|| {
-            let class_brush = CreateSolidBrush(0x00F9F6F5);
+            let class_brush = CreateSolidBrush(pal.win32_bg_bgr);
             let wc = WNDCLASSW {
                 lpfnWndProc: Some(settings_wnd_proc),
                 hInstance: hinst,
@@ -114,6 +123,7 @@ where
             hinst,
             ptr::null(),
         );
+        apply_dwm_dark_titlebar(hwnd, pal.dark);
 
         let font = CreateFontW(
             -sc(14.5),
@@ -169,7 +179,17 @@ where
                 ptr::null(),
             );
             SendMessageW(hw, WM_SETFONT, font as WPARAM, 1);
+            if cls == "BUTTON" || cls == "EDIT" {
+                apply_dark_control_theme(hw, pal.dark);
+            }
             hw
+        };
+
+        let make_checkbox = |label: &str, y: i32, chk_id: i32, lbl_id: i32| -> HWND {
+            let box_w = sc(20.0);
+            let chk = make_ctrl("BUTTON", "", 0, BS_AUTOCHECKBOX | WS_TABSTOP, pad, y, box_w, sc(24.0), chk_id);
+            make_ctrl("STATIC", label, 0, SS_NOTIFY, pad + box_w + sc(4.0), y + sc(2.0), inner - box_w - sc(4.0), sc(22.0), lbl_id);
+            chk
         };
 
         make_ctrl("STATIC", "电视无线 ADB 地址 (IP:端口)：", 0, 0, pad, sc(16.0), inner, sc(20.0), 0);
@@ -177,9 +197,9 @@ where
         make_ctrl("BUTTON", "测试连接", 0, WS_TABSTOP, cw - pad - sc(88.0), sc(41.0), sc(88.0), sc(30.0), ID_BTN_TEST);
         make_ctrl("STATIC", "", 0, 0, pad, sc(74.0), inner, sc(18.0), ID_LBL_STATUS);
 
-        let chk_to = make_ctrl("BUTTON", "切换到「电视系统」时自动接管电脑键鼠", 0, BS_AUTOCHECKBOX | WS_TABSTOP, pad, sc(98.0), inner, sc(24.0), ID_CHK_TAKEOVER);
-        let chk_wh = make_ctrl("BUTTON", "接管期间鼠标滚轮映射为上下方向键", 0, BS_AUTOCHECKBOX | WS_TABSTOP, pad, sc(128.0), inner, sc(24.0), ID_CHK_WHEEL);
-        let chk_as = make_ctrl("BUTTON", "Windows 开机自动启动", 0, BS_AUTOCHECKBOX | WS_TABSTOP, pad, sc(158.0), inner, sc(24.0), ID_CHK_AUTOSTART);
+        let chk_to = make_checkbox("切换到「电视系统」时自动接管电脑键鼠", sc(98.0), ID_CHK_TAKEOVER, ID_LBL_CHK_TAKEOVER);
+        let chk_wh = make_checkbox("接管期间鼠标滚轮映射为上下方向键", sc(128.0), ID_CHK_WHEEL, ID_LBL_CHK_WHEEL);
+        let chk_as = make_checkbox("Windows 开机自动启动", sc(158.0), ID_CHK_AUTOSTART, ID_LBL_CHK_AUTOSTART);
 
         SendMessageW(chk_to, BM_SETCHECK, if auto_to { BST_CHECKED } else { BST_UNCHECKED } as WPARAM, 0);
         SendMessageW(chk_wh, BM_SETCHECK, if wheel_dp { BST_CHECKED } else { BST_UNCHECKED } as WPARAM, 0);
@@ -195,7 +215,9 @@ where
             *c.borrow_mut() = Some(SettingsState {
                 hwnd,
                 font,
+                palette: pal,
                 bg_brush,
+                edit_brush,
                 cfg,
                 dev,
                 on_saved: Some(Box::new(on_saved)),
@@ -221,16 +243,63 @@ unsafe fn get_edit_text(hwnd: HWND, id: i32) -> String {
 
 unsafe extern "system" fn settings_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
+        WM_ERASEBKGND => {
+            let hdc = wp as windows_sys::Win32::Graphics::Gdi::HDC;
+            let br = SETTINGS_STATE
+                .with(|c| c.borrow().as_ref().map(|s| s.bg_brush).unwrap_or(ptr::null_mut()));
+            if !br.is_null() {
+                let mut rc: RECT = std::mem::zeroed();
+                GetClientRect(hwnd, &mut rc);
+                FillRect(hdc, &rc, br);
+                return 1;
+            }
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
         WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => {
             let hdc = wp as windows_sys::Win32::Graphics::Gdi::HDC;
-            SetBkColor(hdc, 0x00F9F6F5);
-            SetTextColor(hdc, 0x00241E1A);
-            let br = SETTINGS_STATE.with(|c| c.borrow().as_ref().map(|s| s.bg_brush).unwrap_or(ptr::null_mut()));
-            return br as LRESULT;
+            let info = SETTINGS_STATE.with(|c| {
+                c.borrow()
+                    .as_ref()
+                    .map(|s| (s.palette.win32_bg_bgr, s.palette.win32_text_bgr, s.bg_brush))
+            });
+            if let Some((bg, fg, br)) = info {
+                SetBkColor(hdc, bg);
+                SetTextColor(hdc, fg);
+                return br as LRESULT;
+            }
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
+        WM_CTLCOLOREDIT => {
+            let hdc = wp as windows_sys::Win32::Graphics::Gdi::HDC;
+            let info = SETTINGS_STATE.with(|c| {
+                c.borrow()
+                    .as_ref()
+                    .map(|s| (s.palette.win32_edit_bg_bgr, s.palette.win32_text_bgr, s.edit_brush))
+            });
+            if let Some((bg, fg, br)) = info {
+                SetBkColor(hdc, bg);
+                SetTextColor(hdc, fg);
+                return br as LRESULT;
+            }
+            DefWindowProcW(hwnd, msg, wp, lp)
         }
         WM_COMMAND => {
             let id = (wp & 0xFFFF) as i32;
             match id {
+                ID_LBL_CHK_TAKEOVER | ID_LBL_CHK_WHEEL | ID_LBL_CHK_AUTOSTART => {
+                    let chk_id = id - 10;
+                    let chk = GetDlgItem(hwnd, chk_id);
+                    if !chk.is_null() {
+                        let cur = SendMessageW(chk, BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
+                        SendMessageW(
+                            chk,
+                            BM_SETCHECK,
+                            if cur { BST_UNCHECKED } else { BST_CHECKED } as WPARAM,
+                            0,
+                        );
+                    }
+                    0
+                }
                 ID_BTN_TEST => {
                     let raw = get_edit_text(hwnd, ID_EDIT_ADDR);
                     let addr = AppConfig::normalize_address(&raw);
@@ -336,6 +405,9 @@ unsafe extern "system" fn settings_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp
                     }
                     if !st.bg_brush.is_null() {
                         DeleteObject(st.bg_brush as _);
+                    }
+                    if !st.edit_brush.is_null() {
+                        DeleteObject(st.edit_brush as _);
                     }
                 }
             });

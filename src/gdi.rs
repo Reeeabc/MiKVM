@@ -1,26 +1,181 @@
 use crate::config::to_wide;
+use std::ffi::c_void;
 use std::ptr;
+use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
 use windows_sys::Win32::Graphics::GdiPlus::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::HICON;
 
-pub const COL_SURFACE_BG: u32 = 0xFFF5F6F9;
-pub const COL_FOOTER_BG: u32 = 0xFFECEEF3;
-pub const COL_CARD_BG: u32 = 0xFFFFFFFF;
-pub const COL_CARD_HOVER: u32 = 0xFFF9FAFC;
-pub const COL_CARD_PRESSED: u32 = 0xFFECEFF4;
-pub const COL_CARD_BORDER: u32 = 0xFFE0E3E8;
-pub const COL_BTN_BORDER: u32 = 0xFFD7DBE2;
-pub const COL_ACCENT_BLUE: u32 = 0xFF0067C0;
-pub const COL_ACCENT_HOVER: u32 = 0xFF005AA8;
-pub const COL_TEXT_PRIMARY: u32 = 0xFF1A1E24;
-pub const COL_TEXT_SECONDARY: u32 = 0xFF5F6672;
-pub const COL_DIVIDER: u32 = 0xFFE4E7EC;
-pub const COL_TRACK_BG: u32 = 0xFFC4C8CF;
-pub const COL_THUMB_BORDER: u32 = 0xFFCCD0D6;
-pub const COL_STATUS_GREEN: u32 = 0xFF107C10;
-pub const COL_STATUS_AMBER: u32 = 0xFFCA8200;
-pub const COL_STATUS_RED: u32 = 0xFFC42B1C;
-pub const COL_WHITE: u32 = 0xFFFFFFFF;
+const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
+const DWMWA_BORDER_COLOR_ATTR: u32 = 34;
+
+#[derive(Clone, Copy, Debug)]
+pub struct ThemePalette {
+    pub dark: bool,
+    pub surface_bg: u32,
+    pub footer_bg: u32,
+    pub card_bg: u32,
+    pub card_hover: u32,
+    pub card_pressed: u32,
+    pub card_border: u32,
+    pub btn_bg: u32,
+    pub btn_hover: u32,
+    pub btn_pressed: u32,
+    pub btn_border: u32,
+    pub accent: u32,
+    pub accent_hover: u32,
+    pub accent_text: u32,
+    pub active_icon: u32,
+    pub text_primary: u32,
+    pub text_secondary: u32,
+    pub divider: u32,
+    pub track_bg: u32,
+    pub thumb_outer: u32,
+    pub thumb_border: u32,
+    pub status_green: u32,
+    pub status_amber: u32,
+    pub status_red: u32,
+    pub reconnect_hover: u32,
+    pub reconnect_pressed: u32,
+    /// COLORREF (0x00BBGGRR) for DWMWA_BORDER_COLOR
+    pub dwm_border_bgr: u32,
+    /// COLORREF (0x00BBGGRR) for native Win32 dialog background & text
+    pub win32_bg_bgr: u32,
+    pub win32_edit_bg_bgr: u32,
+    pub win32_text_bgr: u32,
+}
+
+impl ThemePalette {
+    pub const fn light() -> Self {
+        Self {
+            dark: false,
+            surface_bg: 0xFFF6F7FA,
+            footer_bg: 0xFFECEEF3,
+            card_bg: 0xFFFFFFFF,
+            card_hover: 0xFFF8F9FC,
+            card_pressed: 0xFFECEFF4,
+            card_border: 0xFFE1E4EA,
+            btn_bg: 0xFFFFFFFF,
+            btn_hover: 0xFFF9FAFC,
+            btn_pressed: 0xFFECEFF4,
+            btn_border: 0xFFD7DBE2,
+            accent: 0xFF0067C0,
+            accent_hover: 0xFF005AA8,
+            accent_text: 0xFF0067C0,
+            active_icon: 0xFFFFFFFF,
+            text_primary: 0xFF1A1E24,
+            text_secondary: 0xFF5F6672,
+            divider: 0xFFE5E8EE,
+            track_bg: 0xFFC4C8CF,
+            thumb_outer: 0xFFFFFFFF,
+            thumb_border: 0xFFCCD0D6,
+            status_green: 0xFF107C10,
+            status_amber: 0xFFCA8200,
+            status_red: 0xFFC42B1C,
+            reconnect_hover: 0xFFE8ECF2,
+            reconnect_pressed: 0xFFDDE3EC,
+            dwm_border_bgr: 0x00E0D8D4,
+            win32_bg_bgr: 0x00FAF7F6,
+            win32_edit_bg_bgr: 0x00FFFFFF,
+            win32_text_bgr: 0x00241E1A,
+        }
+    }
+
+    pub const fn dark() -> Self {
+        Self {
+            dark: true,
+            surface_bg: 0xFF202225,
+            footer_bg: 0xFF191B1E,
+            card_bg: 0xFF2B2E33,
+            card_hover: 0xFF34383F,
+            card_pressed: 0xFF25282D,
+            card_border: 0xFF3A3E46,
+            btn_bg: 0xFF2B2E33,
+            btn_hover: 0xFF353940,
+            btn_pressed: 0xFF24272C,
+            btn_border: 0xFF3E434C,
+            accent: 0xFF4CC2FF,
+            accent_hover: 0xFF66CCFF,
+            accent_text: 0xFF60CDFF,
+            active_icon: 0xFF11161C,
+            text_primary: 0xFFF2F4F8,
+            text_secondary: 0xFFA5ADB9,
+            divider: 0xFF31353C,
+            track_bg: 0xFF525862,
+            thumb_outer: 0xFF383C44,
+            thumb_border: 0xFF5C626E,
+            status_green: 0xFF6CCB5F,
+            status_amber: 0xFFFCE100,
+            status_red: 0xFFFF99A4,
+            reconnect_hover: 0xFF2E3239,
+            reconnect_pressed: 0xFF252930,
+            dwm_border_bgr: 0x004E4642,
+            win32_bg_bgr: 0x00252220,
+            win32_edit_bg_bgr: 0x00332E2B,
+            win32_text_bgr: 0x00F8F4F2,
+        }
+    }
+
+    pub fn current() -> Self {
+        if crate::config::is_apps_dark_mode() {
+            Self::dark()
+        } else {
+            Self::light()
+        }
+    }
+}
+
+pub unsafe fn apply_dwm_dark_titlebar(hwnd: HWND, dark: bool) {
+    let val: i32 = if dark { 1 } else { 0 };
+    let _ = DwmSetWindowAttribute(
+        hwnd,
+        DWMWA_USE_IMMERSIVE_DARK_MODE,
+        &val as *const i32 as *const _,
+        std::mem::size_of::<i32>() as u32,
+    );
+}
+
+pub unsafe fn apply_dwm_border_color(hwnd: HWND, bgr: u32) {
+    let _ = DwmSetWindowAttribute(
+        hwnd,
+        DWMWA_BORDER_COLOR_ATTR,
+        &bgr as *const u32 as *const _,
+        std::mem::size_of::<u32>() as u32,
+    );
+}
+
+type FnSetWindowTheme = unsafe extern "system" fn(HWND, *const u16, *const u16) -> i32;
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn LoadLibraryW(lp_lib_file_name: *const u16) -> *mut c_void;
+    fn GetProcAddress(h_module: *mut c_void, lp_proc_name: *const u8) -> *const c_void;
+}
+
+pub unsafe fn apply_dark_control_theme(ctrl: HWND, dark: bool) {
+    static FN_PTR: std::sync::OnceLock<Option<FnSetWindowTheme>> = std::sync::OnceLock::new();
+    let f = *FN_PTR.get_or_init(|| {
+        let dll = to_wide("uxtheme.dll");
+        let hmod = LoadLibraryW(dll.as_ptr());
+        if hmod.is_null() {
+            return None;
+        }
+        let proc = GetProcAddress(hmod, b"SetWindowTheme\0".as_ptr());
+        if proc.is_null() {
+            return None;
+        }
+        Some(std::mem::transmute::<*const c_void, FnSetWindowTheme>(proc))
+    });
+    if let Some(set_theme) = f {
+        if dark {
+            let dark_name = to_wide("DarkMode_Explorer");
+            let _ = set_theme(ctrl, dark_name.as_ptr(), ptr::null());
+        } else {
+            let light_name = to_wide("Explorer");
+            let _ = set_theme(ctrl, light_name.as_ptr(), ptr::null());
+        }
+    }
+}
 
 pub struct GdipGuard {
     token: usize,
@@ -69,13 +224,6 @@ pub unsafe fn fill_rect(g: *mut GpGraphics, x: f32, y: f32, w: f32, h: f32, argb
     GdipCreateSolidFill(argb, &mut br);
     GdipFillRectangle(g, br as *mut GpBrush, x, y, w, h);
     GdipDeleteBrush(br as *mut GpBrush);
-}
-
-pub unsafe fn draw_rect_border(g: *mut GpGraphics, x: f32, y: f32, w: f32, h: f32, argb: u32, width: f32) {
-    let mut pen: *mut GpPen = ptr::null_mut();
-    GdipCreatePen1(argb, width, UnitPixel, &mut pen);
-    GdipDrawRectangle(g, pen, x, y, w, h);
-    GdipDeletePen(pen);
 }
 
 pub unsafe fn fill_round_rect(g: *mut GpGraphics, x: f32, y: f32, w: f32, h: f32, r: f32, argb: u32) {
@@ -246,7 +394,7 @@ pub unsafe fn draw_speaker_icon(g: *mut GpGraphics, cx: f32, cy: f32, argb: u32,
     GdipDeletePen(pen);
 }
 
-pub fn create_tray_icon(takeover_active: bool) -> HICON {
+pub fn create_tray_icon(takeover_active: bool, dark_taskbar: bool) -> HICON {
     unsafe {
         let mut bmp: *mut GpBitmap = ptr::null_mut();
         const PIXEL_FORMAT_32BPP_ARGB: i32 = 0x0026_200A;
@@ -256,8 +404,17 @@ pub fn create_tray_icon(takeover_active: bool) -> HICON {
         GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
         GdipGraphicsClear(g, 0x00000000);
 
-        let stroke = if takeover_active { 0xFF00825F } else { 0xFF1E242C };
-        let fill = if takeover_active { 0xFF00A878 } else { 0xFFF5F8FC };
+        let (stroke, fill) = if takeover_active {
+            if dark_taskbar {
+                (0xFF4BE2A8, 0xFF0E7A55)
+            } else {
+                (0xFF00825F, 0xFF00A878)
+            }
+        } else if dark_taskbar {
+            (0xFFF0F4FA, 0x33FFFFFF)
+        } else {
+            (0xFF1E242C, 0xFFF5F8FC)
+        };
         fill_round_rect(g, 4.0, 5.0, 24.0, 16.0, 2.5, fill);
         draw_round_rect(g, 4.0, 5.0, 24.0, 16.0, 2.5, stroke, 2.5);
         draw_line(g, 16.0, 21.0, 16.0, 27.0, stroke, 2.5);

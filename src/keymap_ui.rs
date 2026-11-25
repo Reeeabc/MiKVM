@@ -1,4 +1,5 @@
 use crate::config::{to_wide, AppConfig};
+use crate::gdi::{apply_dark_control_theme, apply_dwm_dark_titlebar, ThemePalette};
 use crate::keymap::{
     is_modifier_vk, validate_chord, KeyAction, KeyChord, KeyMap, ACTION_COUNT, ALL_ACTIONS,
     MOD_ALT, MOD_CTRL, MOD_SHIFT,
@@ -9,9 +10,9 @@ use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    CreateFontW, CreateSolidBrush, DeleteObject, GetDC, GetDeviceCaps, ReleaseDC, SetBkColor,
-    SetTextColor, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH,
-    FF_DONTCARE, FW_NORMAL, HBRUSH, HFONT, LOGPIXELSX, OUT_DEFAULT_PRECIS,
+    CreateFontW, CreateSolidBrush, DeleteObject, FillRect, GetDC, GetDeviceCaps, ReleaseDC,
+    SetBkColor, SetTextColor, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET,
+    DEFAULT_PITCH, FF_DONTCARE, FW_NORMAL, HBRUSH, HFONT, LOGPIXELSX, OUT_DEFAULT_PRECIS,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -39,6 +40,7 @@ static REC_HWND: AtomicUsize = AtomicUsize::new(0);
 struct KeymapUiState {
     hwnd: HWND,
     font: HFONT,
+    palette: ThemePalette,
     bg_brush: HBRUSH,
     cfg: Arc<Mutex<AppConfig>>,
     draft: KeyMap,
@@ -119,12 +121,13 @@ where
     }
 
     unsafe {
+        let pal = ThemePalette::current();
         let hinst = GetModuleHandleW(ptr::null());
         let cls_w = to_wide(KEYMAP_CLASS);
-        let bg_brush = CreateSolidBrush(0x00F9F6F5);
+        let bg_brush = CreateSolidBrush(pal.win32_bg_bgr);
         static CLASS_REG: std::sync::Once = std::sync::Once::new();
         CLASS_REG.call_once(|| {
-            let class_brush = CreateSolidBrush(0x00F9F6F5);
+            let class_brush = CreateSolidBrush(pal.win32_bg_bgr);
             let wc = WNDCLASSW {
                 lpfnWndProc: Some(keymap_wnd_proc),
                 hInstance: hinst,
@@ -171,6 +174,7 @@ where
             hinst,
             ptr::null(),
         );
+        apply_dwm_dark_titlebar(hwnd, pal.dark);
 
         let font = CreateFontW(
             -sc(14.0),
@@ -210,6 +214,9 @@ where
                 ptr::null(),
             );
             SendMessageW(hw, WM_SETFONT, font as WPARAM, 1);
+            if cls == "BUTTON" {
+                apply_dark_control_theme(hw, pal.dark);
+            }
             hw
         };
 
@@ -288,6 +295,7 @@ where
             *c.borrow_mut() = Some(KeymapUiState {
                 hwnd,
                 font,
+                palette: pal,
                 bg_brush,
                 cfg,
                 draft,
@@ -324,12 +332,31 @@ unsafe fn set_msg(hwnd: HWND, text: &str) {
 
 unsafe extern "system" fn keymap_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
+        WM_ERASEBKGND => {
+            let hdc = wp as windows_sys::Win32::Graphics::Gdi::HDC;
+            let br = KEYMAP_STATE
+                .with(|c| c.borrow().as_ref().map(|s| s.bg_brush).unwrap_or(ptr::null_mut()));
+            if !br.is_null() {
+                let mut rc: RECT = std::mem::zeroed();
+                GetClientRect(hwnd, &mut rc);
+                FillRect(hdc, &rc, br);
+                return 1;
+            }
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
         WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => {
             let hdc = wp as windows_sys::Win32::Graphics::Gdi::HDC;
-            SetBkColor(hdc, 0x00F9F6F5);
-            SetTextColor(hdc, 0x00241E1A);
-            let br = KEYMAP_STATE.with(|c| c.borrow().as_ref().map(|s| s.bg_brush).unwrap_or(ptr::null_mut()));
-            return br as LRESULT;
+            let info = KEYMAP_STATE.with(|c| {
+                c.borrow()
+                    .as_ref()
+                    .map(|s| (s.palette.win32_bg_bgr, s.palette.win32_text_bgr, s.bg_brush))
+            });
+            if let Some((bg, fg, br)) = info {
+                SetBkColor(hdc, bg);
+                SetTextColor(hdc, fg);
+                return br as LRESULT;
+            }
+            DefWindowProcW(hwnd, msg, wp, lp)
         }
         WM_ACTIVATE => {
             if (wp & 0xFFFF) as u32 == WA_INACTIVE {

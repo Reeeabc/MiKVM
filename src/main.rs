@@ -12,12 +12,13 @@ mod takeover;
 
 use crate::adb::DeviceController;
 use crate::config::{
-    exe_dir, resolve_asset_dir, resolve_scrcpy_dir, to_wide, AppConfig, DeviceStatus, SignalSource,
+    exe_dir, from_wide, is_system_dark_mode, resolve_asset_dir, resolve_scrcpy_dir, to_wide,
+    AppConfig, DeviceStatus, SignalSource,
 };
 use crate::flyout::{
-    create_flyout, hide_flyout, is_flyout_visible, set_flyout_optimistic_source,
-    set_flyout_refreshing, show_flyout_near_tray, update_flyout_status, was_just_hidden,
-    FlyoutAction,
+    create_flyout, hide_flyout, is_flyout_visible, refresh_flyout_theme,
+    set_flyout_optimistic_source, set_flyout_refreshing, show_flyout_near_tray,
+    update_flyout_status, was_just_hidden, FlyoutAction,
 };
 use crate::gdi::{create_tray_icon, GdipGuard};
 use crate::ime::{find_english_hkl, restore_saved_ime, SavedImeState};
@@ -475,6 +476,40 @@ unsafe extern "system" fn host_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             }
             0
         }
+        WM_SETTINGCHANGE => {
+            let is_theme_change = if lp == 0 {
+                true
+            } else {
+                let ptr = lp as *const u16;
+                let mut len = 0usize;
+                while len < 64 && *ptr.add(len) != 0 {
+                    len += 1;
+                }
+                let slice = std::slice::from_raw_parts(ptr, len);
+                from_wide(slice).eq_ignore_ascii_case("ImmersiveColorSet")
+            };
+            if is_theme_change {
+                let dark_tb = is_system_dark_mode();
+                let new_idle = create_tray_icon(false, dark_tb);
+                let new_active = create_tray_icon(true, dark_tb);
+                let swapped = with_host(|h| {
+                    let old_idle = std::mem::replace(&mut h.idle_icon, new_idle);
+                    let old_active = std::mem::replace(&mut h.active_icon, new_active);
+                    let running = h.takeover.lock().map(|t| t.is_running()).unwrap_or(false);
+                    (old_idle, old_active, running)
+                });
+                if let Some((old_idle, old_active, running)) = swapped {
+                    update_tray_takeover_visual(running);
+                    DestroyIcon(old_idle);
+                    DestroyIcon(old_active);
+                } else {
+                    DestroyIcon(new_idle);
+                    DestroyIcon(new_active);
+                }
+                refresh_flyout_theme();
+            }
+            0
+        }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
     }
 }
@@ -541,8 +576,9 @@ fn main() {
         )
     };
 
-    let idle_icon = create_tray_icon(false);
-    let active_icon = create_tray_icon(true);
+    let dark_tb = is_system_dark_mode();
+    let idle_icon = create_tray_icon(false, dark_tb);
+    let active_icon = create_tray_icon(true, dark_tb);
     let english_hkl = find_english_hkl();
     let takeover = Arc::new(Mutex::new(TakeoverSession::new(
         scrcpy_dir,

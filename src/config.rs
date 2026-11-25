@@ -9,6 +9,38 @@ use windows_sys::Win32::System::Registry::{
 const RUN_REG_PATH: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const RUN_REG_NAME: &str = "MiKVM";
 const LEGACY_RUN_REG_NAME: &str = "MiTVSwitch";
+const PERSONALIZE_REG_PATH: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
+
+fn read_personalize_dword(name: &str, default_val: u32) -> u32 {
+    unsafe {
+        let path_w = to_wide(PERSONALIZE_REG_PATH);
+        let name_w = to_wide(name);
+        let mut hkey: HKEY = std::ptr::null_mut();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, path_w.as_ptr(), 0, KEY_READ, &mut hkey) != 0 {
+            return default_val;
+        }
+        let mut val: u32 = default_val;
+        let mut size: u32 = std::mem::size_of::<u32>() as u32;
+        let rc = RegQueryValueExW(
+            hkey,
+            name_w.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut val as *mut u32 as *mut u8,
+            &mut size,
+        );
+        RegCloseKey(hkey);
+        if rc == 0 { val } else { default_val }
+    }
+}
+
+pub fn is_apps_dark_mode() -> bool {
+    read_personalize_dword("AppsUseLightTheme", 1) == 0
+}
+
+pub fn is_system_dark_mode() -> bool {
+    read_personalize_dword("SystemUsesLightTheme", 1) == 0
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignalSource {

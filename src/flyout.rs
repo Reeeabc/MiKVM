@@ -25,6 +25,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 const FLYOUT_CLASS: &str = "MiKVMFluentFlyout";
 const SLIDER_THROTTLE_MS: u128 = 35;
 const DWMWCP_ROUND: i32 = 2;
+const TIMER_ANIM: usize = 109;
+const ANIM_DURATION_MS: f32 = 135.0;
+const ANIM_OFFSET_DIP: f32 = 14.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FlyoutAction {
@@ -165,6 +168,7 @@ impl FlyoutLayout {
 struct FlyoutState {
     hwnd: HWND,
     layout: FlyoutLayout,
+    palette: ThemePalette,
     connected: bool,
     refreshing: bool,
     status_text: String,
@@ -180,6 +184,10 @@ struct FlyoutState {
     visible: bool,
     suppress_deactivate: bool,
     last_hidden: Option<Instant>,
+    anim_start: Option<Instant>,
+    anim_target_x: i32,
+    anim_target_y: i32,
+    anim_offset_px: i32,
     on_action: Option<Box<dyn Fn(FlyoutAction)>>,
 }
 
@@ -220,9 +228,10 @@ where
 
         let scale = current_dpi_scale();
         let layout = FlyoutLayout::new(scale);
+        let palette = ThemePalette::current();
 
         let hwnd = CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
             cls_w.as_ptr(),
             to_wide("MiKVM").as_ptr(),
             WS_POPUP,
@@ -243,11 +252,15 @@ where
             &pref as *const i32 as *const _,
             std::mem::size_of::<i32>() as u32,
         );
+        apply_dwm_dark_titlebar(hwnd, palette.dark);
+        apply_dwm_border_color(hwnd, palette.dwm_border_bgr);
+        SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
 
         FLYOUT_STATE.with(|cell| {
             *cell.borrow_mut() = Some(FlyoutState {
                 hwnd,
                 layout,
+                palette,
                 connected: false,
                 refreshing: false,
                 status_text: "正在连接...".to_string(),
@@ -263,10 +276,34 @@ where
                 visible: false,
                 suppress_deactivate: false,
                 last_hidden: None,
+                anim_start: None,
+                anim_target_x: 0,
+                anim_target_y: 0,
+                anim_offset_px: 0,
                 on_action: Some(Box::new(on_action)),
             });
         });
         hwnd
+    }
+}
+
+pub fn refresh_flyout_theme() {
+    let pal = ThemePalette::current();
+    let info = FLYOUT_STATE.with(|c| {
+        let mut b = c.borrow_mut();
+        b.as_mut().map(|st| {
+            st.palette = pal;
+            (st.hwnd, st.visible)
+        })
+    });
+    if let Some((hwnd, visible)) = info {
+        unsafe {
+            apply_dwm_dark_titlebar(hwnd, pal.dark);
+            apply_dwm_border_color(hwnd, pal.dwm_border_bgr);
+            if visible {
+                InvalidateRect(hwnd, ptr::null(), 0);
+            }
+        }
     }
 }
 
@@ -285,30 +322,44 @@ pub fn was_just_hidden() -> bool {
 }
 
 pub fn show_flyout_near_tray() {
+    let pal = ThemePalette::current();
     let info = FLYOUT_STATE.with(|c| {
         let mut borrow = c.borrow_mut();
         borrow.as_mut().map(|st| {
+            st.palette = pal;
             st.suppress_deactivate = true;
             st.visible = true;
             (st.hwnd, st.layout.w, st.layout.h, st.layout.s)
         })
     });
     if let Some((hwnd, w, h, s)) = info {
-        unsafe {
+        let (x, y, offset_px) = unsafe {
+            apply_dwm_dark_titlebar(hwnd, pal.dark);
+            apply_dwm_border_color(hwnd, pal.dwm_border_bgr);
             let mut wa: RECT = std::mem::zeroed();
             SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut wa as *mut _ as *mut _, 0);
             let margin = (12.0 * s).round() as i32;
-            let x = wa.right - w - margin;
-            let y = wa.bottom - h - margin;
-            SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h, SWP_SHOWWINDOW);
+            let tx = wa.right - w - margin;
+            let ty = wa.bottom - h - margin;
+            let off = (ANIM_OFFSET_DIP * s).round() as i32;
+            SetLayeredWindowAttributes(hwnd, 0, 24, LWA_ALPHA);
+            SetWindowPos(hwnd, HWND_TOPMOST, tx, ty + off, w, h, SWP_SHOWWINDOW);
             SetForegroundWindow(hwnd);
             InvalidateRect(hwnd, ptr::null(), 0);
-        }
+            (tx, ty, off)
+        };
         FLYOUT_STATE.with(|c| {
             if let Some(st) = c.borrow_mut().as_mut() {
                 st.suppress_deactivate = false;
+                st.anim_start = Some(Instant::now());
+                st.anim_target_x = x;
+                st.anim_target_y = y;
+                st.anim_offset_px = offset_px;
             }
         });
+        unsafe {
+            SetTimer(hwnd, TIMER_ANIM, 15, None);
+        }
         emit_action(FlyoutAction::VisibilityChanged(true));
     }
 }
@@ -321,6 +372,7 @@ pub fn hide_flyout() {
                 st.visible = false;
                 st.hover = HitPart::None;
                 st.pressed = HitPart::None;
+                st.anim_start = None;
                 st.last_hidden = Some(Instant::now());
                 return Some(st.hwnd);
             }
@@ -329,6 +381,7 @@ pub fn hide_flyout() {
     });
     if let Some(hwnd) = hwnd_to_hide {
         unsafe {
+            KillTimer(hwnd, TIMER_ANIM);
             ShowWindow(hwnd, SW_HIDE);
         }
         emit_action(FlyoutAction::VisibilityChanged(false));
@@ -431,24 +484,25 @@ unsafe fn paint_flyout(st: &FlyoutState, hdc: windows_sys::Win32::Graphics::Gdi:
     GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
     GdipSetTextRenderingHint(g, TextRenderingHintClearTypeGridFit);
 
-    // Background + Footer
-    fill_rect(g, 0.0, 0.0, l.w as f32, l.h as f32, COL_SURFACE_BG);
-    fill_rect(g, 0.0, l.footer_y, l.w as f32, l.h as f32 - l.footer_y, COL_FOOTER_BG);
-    draw_line(g, 0.0, l.footer_y, l.w as f32, l.footer_y, COL_DIVIDER, 1.0);
-    draw_rect_border(g, 0.0, 0.0, (l.w - 1) as f32, (l.h - 1) as f32, COL_CARD_BORDER, 1.0);
+    let p = &st.palette;
+
+    // Background + Footer (native DWMWA_BORDER_COLOR draws the rounded 1px outer rim)
+    fill_rect(g, 0.0, 0.0, l.w as f32, l.h as f32, p.surface_bg);
+    fill_rect(g, 0.0, l.footer_y, l.w as f32, l.h as f32 - l.footer_y, p.footer_bg);
+    draw_line(g, 0.0, l.footer_y, l.w as f32, l.footer_y, p.divider, 1.0);
 
     // Status row (clickable to reconnect when disconnected)
     let can_reconnect = !st.connected && !st.refreshing;
     if can_reconnect && (st.hover == HitPart::StatusReconnect || st.pressed == HitPart::StatusReconnect) {
-        let bg = if st.pressed == HitPart::StatusReconnect { COL_CARD_PRESSED } else { COL_FOOTER_BG };
+        let bg = if st.pressed == HitPart::StatusReconnect { p.reconnect_pressed } else { p.reconnect_hover };
         fill_round_rect(g, l.status_row.x, l.status_row.y, l.status_row.w, l.status_row.h, 6.0 * s, bg);
     }
     let dot_col = if st.refreshing {
-        COL_STATUS_AMBER
+        p.status_amber
     } else if st.connected {
-        COL_STATUS_GREEN
+        p.status_green
     } else {
-        COL_STATUS_RED
+        p.status_red
     };
     let dot_d = 8.5 * s;
     fill_ellipse(g, l.pad, 26.0 * s - dot_d / 2.0, dot_d, dot_d, dot_col);
@@ -461,16 +515,16 @@ unsafe fn paint_flyout(st: &FlyoutState, hdc: windows_sys::Win32::Graphics::Gdi:
         32.0 * s,
         12.5 * s,
         false,
-        COL_TEXT_PRIMARY,
+        p.text_primary,
         StringAlignmentNear,
         StringAlignmentCenter,
     );
-    draw_line(g, l.pad, 48.0 * s, l.w as f32 - l.pad, 48.0 * s, COL_DIVIDER, 1.0);
+    draw_line(g, l.pad, 48.0 * s, l.w as f32 - l.pad, 48.0 * s, p.divider, 1.0);
 
     // Section labels
-    draw_text(g, "信号源", l.pad, 56.0 * s, 100.0 * s, 20.0 * s, 12.0 * s, false, COL_TEXT_SECONDARY, StringAlignmentNear, StringAlignmentCenter);
-    draw_text(g, "背光", l.pad, 256.0 * s, 100.0 * s, 20.0 * s, 12.0 * s, false, COL_TEXT_SECONDARY, StringAlignmentNear, StringAlignmentCenter);
-    draw_text(g, "音量", l.pad, 310.0 * s, 100.0 * s, 20.0 * s, 12.0 * s, false, COL_TEXT_SECONDARY, StringAlignmentNear, StringAlignmentCenter);
+    draw_text(g, "信号源", l.pad, 56.0 * s, 100.0 * s, 20.0 * s, 12.0 * s, false, p.text_secondary, StringAlignmentNear, StringAlignmentCenter);
+    draw_text(g, "背光", l.pad, 256.0 * s, 100.0 * s, 20.0 * s, 12.0 * s, false, p.text_secondary, StringAlignmentNear, StringAlignmentCenter);
+    draw_text(g, "音量", l.pad, 310.0 * s, 100.0 * s, 20.0 * s, 12.0 * s, false, p.text_secondary, StringAlignmentNear, StringAlignmentCenter);
 
     // 2x2 Source tiles
     for (src, label, hit, card) in &l.tiles {
@@ -478,16 +532,16 @@ unsafe fn paint_flyout(st: &FlyoutState, hdc: windows_sys::Win32::Graphics::Gdi:
         let hov = st.hover == HitPart::Tile(*src);
         let prs = st.pressed == HitPart::Tile(*src);
         let fill = if active {
-            if hov { COL_ACCENT_HOVER } else { COL_ACCENT_BLUE }
+            if hov { p.accent_hover } else { p.accent }
         } else if prs {
-            COL_CARD_PRESSED
+            p.card_pressed
         } else if hov {
-            COL_CARD_HOVER
+            p.card_hover
         } else {
-            COL_CARD_BG
+            p.card_bg
         };
-        let border = if active { fill } else { COL_CARD_BORDER };
-        let icon_col = if active { COL_WHITE } else { COL_TEXT_PRIMARY };
+        let border = if active { fill } else { p.card_border };
+        let icon_col = if active { p.active_icon } else { p.text_primary };
 
         fill_round_rect(g, card.x, card.y, card.w, card.h, 7.0 * s, fill);
         draw_round_rect(g, card.x, card.y, card.w, card.h, 7.0 * s, border, 1.0);
@@ -509,20 +563,21 @@ unsafe fn paint_flyout(st: &FlyoutState, hdc: windows_sys::Win32::Graphics::Gdi:
             22.0 * s,
             12.2 * s,
             active,
-            if active { COL_ACCENT_BLUE } else { COL_TEXT_PRIMARY },
+            if active { p.accent_text } else { p.text_primary },
             StringAlignmentCenter,
             StringAlignmentCenter,
         );
     }
 
     // Backlight row
-    draw_sun_icon(g, l.pad + 12.0 * s, l.bl_slider.y + l.bl_slider.h / 2.0, COL_TEXT_SECONDARY, s);
+    draw_sun_icon(g, l.pad + 12.0 * s, l.bl_slider.y + l.bl_slider.h / 2.0, p.text_secondary, s);
     paint_slider(
         g,
         &l.bl_slider,
         st.backlight.unwrap_or(50),
         st.hover == HitPart::SliderBacklight,
         st.dragging_bl,
+        p,
         s,
     );
     let bl_txt = st.backlight.map(|v| v.to_string()).unwrap_or_else(|| "--".to_string());
@@ -535,19 +590,20 @@ unsafe fn paint_flyout(st: &FlyoutState, hdc: windows_sys::Win32::Graphics::Gdi:
         l.bl_slider.h,
         12.5 * s,
         false,
-        COL_TEXT_SECONDARY,
+        p.text_secondary,
         StringAlignmentFar,
         StringAlignmentCenter,
     );
 
     // Volume row
-    draw_speaker_icon(g, l.pad + 12.0 * s, l.vol_slider.y + l.vol_slider.h / 2.0, COL_TEXT_SECONDARY, s);
+    draw_speaker_icon(g, l.pad + 12.0 * s, l.vol_slider.y + l.vol_slider.h / 2.0, p.text_secondary, s);
     paint_slider(
         g,
         &l.vol_slider,
         st.volume.unwrap_or(15),
         st.hover == HitPart::SliderVolume,
         st.dragging_vol,
+        p,
         s,
     );
     let vol_txt = st.volume.map(|v| v.to_string()).unwrap_or_else(|| "--".to_string());
@@ -560,14 +616,14 @@ unsafe fn paint_flyout(st: &FlyoutState, hdc: windows_sys::Win32::Graphics::Gdi:
         l.vol_slider.h,
         12.5 * s,
         false,
-        COL_TEXT_SECONDARY,
+        p.text_secondary,
         StringAlignmentFar,
         StringAlignmentCenter,
     );
 
     // Footer buttons (minimalist: Settings + Exit; click red status row to reconnect)
-    paint_btn(g, &l.btn_settings, "ADB 设置...", st.hover == HitPart::BtnSettings, st.pressed == HitPart::BtnSettings, s);
-    paint_btn(g, &l.btn_exit, "退出", st.hover == HitPart::BtnExit, st.pressed == HitPart::BtnExit, s);
+    paint_btn(g, &l.btn_settings, "ADB 设置...", st.hover == HitPart::BtnSettings, st.pressed == HitPart::BtnSettings, p, s);
+    paint_btn(g, &l.btn_exit, "退出", st.hover == HitPart::BtnExit, st.pressed == HitPart::BtnExit, p, s);
 
     GdipDeleteGraphics(g);
     BitBlt(hdc, 0, 0, l.w, l.h, mem_dc, 0, 0, SRCCOPY);
@@ -582,6 +638,7 @@ unsafe fn paint_slider(
     value: i32,
     hovered: bool,
     dragging: bool,
+    p: &ThemePalette,
     s: f32,
 ) {
     let pad = 11.0 * s;
@@ -591,17 +648,17 @@ unsafe fn paint_slider(
     let ratio = (value.clamp(0, 100) as f32) / 100.0;
     let tx = r.x + pad + track_w * ratio;
 
-    fill_round_rect(g, r.x + pad, cy - track_h / 2.0, track_w, track_h, track_h / 2.0, COL_TRACK_BG);
+    fill_round_rect(g, r.x + pad, cy - track_h / 2.0, track_w, track_h, track_h / 2.0, p.track_bg);
     if tx > r.x + pad + 1.0 {
-        fill_round_rect(g, r.x + pad, cy - track_h / 2.0, tx - (r.x + pad), track_h, track_h / 2.0, COL_ACCENT_BLUE);
+        fill_round_rect(g, r.x + pad, cy - track_h / 2.0, tx - (r.x + pad), track_h, track_h / 2.0, p.accent);
     }
 
     let outer_r = 9.0 * s;
-    fill_ellipse(g, tx - outer_r, cy - outer_r, outer_r * 2.0, outer_r * 2.0, COL_WHITE);
-    draw_ellipse(g, tx - outer_r, cy - outer_r, outer_r * 2.0, outer_r * 2.0, COL_THUMB_BORDER, 1.1);
+    fill_ellipse(g, tx - outer_r, cy - outer_r, outer_r * 2.0, outer_r * 2.0, p.thumb_outer);
+    draw_ellipse(g, tx - outer_r, cy - outer_r, outer_r * 2.0, outer_r * 2.0, p.thumb_border, 1.1);
 
     let inner_r = if dragging { 4.2 } else if hovered { 5.6 } else { 4.8 } * s;
-    fill_ellipse(g, tx - inner_r, cy - inner_r, inner_r * 2.0, inner_r * 2.0, COL_ACCENT_BLUE);
+    fill_ellipse(g, tx - inner_r, cy - inner_r, inner_r * 2.0, inner_r * 2.0, p.accent);
 }
 
 unsafe fn paint_btn(
@@ -610,18 +667,19 @@ unsafe fn paint_btn(
     text: &str,
     hovered: bool,
     pressed: bool,
+    p: &ThemePalette,
     s: f32,
 ) {
     let fill = if pressed {
-        COL_CARD_PRESSED
+        p.btn_pressed
     } else if hovered {
-        COL_CARD_HOVER
+        p.btn_hover
     } else {
-        COL_WHITE
+        p.btn_bg
     };
     fill_round_rect(g, r.x, r.y, r.w, r.h, 5.0 * s, fill);
-    draw_round_rect(g, r.x, r.y, r.w, r.h, 5.0 * s, COL_BTN_BORDER, 1.0);
-    draw_text(g, text, r.x, r.y, r.w, r.h, 12.0 * s, false, COL_TEXT_PRIMARY, StringAlignmentCenter, StringAlignmentCenter);
+    draw_round_rect(g, r.x, r.y, r.w, r.h, 5.0 * s, p.btn_border, 1.0);
+    draw_text(g, text, r.x, r.y, r.w, r.h, 12.0 * s, false, p.text_primary, StringAlignmentCenter, StringAlignmentCenter);
 }
 
 unsafe extern "system" fn flyout_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -822,6 +880,34 @@ unsafe extern "system" fn flyout_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: 
             }
             if let Some(a) = action {
                 emit_action(a);
+            }
+            0
+        }
+        WM_TIMER => {
+            if wp == TIMER_ANIM {
+                let frame = FLYOUT_STATE.with(|c| {
+                    let mut b = c.borrow_mut();
+                    let st = b.as_mut()?;
+                    let start = st.anim_start?;
+                    let t = (start.elapsed().as_secs_f32() * 1000.0 / ANIM_DURATION_MS).clamp(0.0, 1.0);
+                    let eased = 1.0 - (1.0 - t).powi(3);
+                    let cur_y = st.anim_target_y + ((1.0 - eased) * st.anim_offset_px as f32).round() as i32;
+                    let alpha = (24.0 + eased * 231.0).round().clamp(0.0, 255.0) as u8;
+                    let done = t >= 1.0;
+                    if done {
+                        st.anim_start = None;
+                    }
+                    Some((st.anim_target_x, cur_y, alpha, done))
+                });
+                if let Some((x, y, alpha, done)) = frame {
+                    SetWindowPos(hwnd, ptr::null_mut(), x, y, 0, 0, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+                    SetLayeredWindowAttributes(hwnd, 0, alpha, LWA_ALPHA);
+                    if done {
+                        KillTimer(hwnd, TIMER_ANIM);
+                    }
+                } else {
+                    KillTimer(hwnd, TIMER_ANIM);
+                }
             }
             0
         }
