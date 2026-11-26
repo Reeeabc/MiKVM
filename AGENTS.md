@@ -26,12 +26,13 @@
 - Repository root: `D:\develop\projects\mitv\MiKVM` (remote `origin` uses SSH: `git@github.com:Reeeabc/MiKVM.git`)
 - Legacy C# v1.0 reference is preserved permanently on git tag `v1.0-csharp`.
 
-### Build `MiKVM.exe` Locally (PowerShell)
+### Build & Test `MiKVM.exe` Locally (PowerShell)
 ```powershell
 $env:RUSTUP_HOME = "D:\develop\rustup"
 $env:CARGO_HOME = "D:\develop\cargo"
 $env:Path = "D:\develop\cargo\bin;D:\develop\mingw64\bin;$env:Path"
 Set-Location "D:\develop\projects\mitv\MiKVM"
+cargo test
 cargo build --release
 Copy-Item "target\release\MiKVM.exe" ".\MiKVM.exe" -Force
 # Verify zero non-system DLL dependencies:
@@ -73,11 +74,16 @@ MiKVM/
 └── src/
     ├── main.rs                    # Single-instance mutex, tray host, WM_INPUT/DISPLAY/POWER/SETTING hub
     ├── config.rs                  # config.ini loader/saver (UTF-8 BOM safe), theme query, PATH discovery, autostart
-    ├── adb.rs                     # ADB runner, status query, size-checked jar deploy, MiTVDaemon coalesced worker
+    ├── adb.rs                     # ADB runner, status query, force-reconnect, size-checked jar deploy, MiTVDaemon worker
     ├── scrcpy_proto.rs            # Direct scrcpy-server 3.0+ TCP client, UHID mouse, primed burst, keys, clipboard
-    ├── display.rs                 # QueryDisplayConfig topology, Xiaomi EDID 0xA961, lid notify, SavedDisplayConfig
+    ├── display.rs                 # QueryDisplayConfig topology, Xiaomi EDID 0xA961, lid/sleep/resume power events
     ├── clipboard.rs               # Win32 CF_UNICODETEXT sync with password-manager privacy format filtering
-    ├── takeover.rs                # 4-state multi-screen KVM, Raw Input, HELD_MODS, StickyKeysGuard, MiTVEdge, DP Watcher
+    ├── takeover/                  # Modular 4-state multi-screen KVM subsystem
+    │   ├── mod.rs                 # TakeoverSession state machine, topology reconcile, sleep/Wi-Fi auto-recovery
+    │   ├── state.rs               # Shared lock-free atomics, TakeoverMode, HELD_MODS, SWALLOWED_VKS bitset
+    │   ├── hooks.rs               # WH_KEYBOARD_LL, WH_MOUSE_LL, WM_INPUT Raw Input, SendInput flush, StickyKeysGuard
+    │   ├── edge.rs                # PC elastic edge trigger window, TvEdgeSensor (MiTVEdge), 3.0x primed alignment
+    │   └── dp_watcher.rs          # Persistent-shell adb DP return watcher
     ├── keymap.rs                  # KeyChord, KeyAction (12 actions incl. ToggleFocus), parser/formatter, presets 1/2
     ├── keymap_ui.rs               # Native Win32 click-to-record shortcut editor (multi-monitor aware)
     ├── flyout.rs                  # Double-buffered GDI+ Win11 rounded flyout (Light/Dark theme auto-sync)
@@ -123,6 +129,7 @@ MiKVM/
 
 8. **Persistent-Shell Fast DP Auto-Return Watcher & `MiTVDaemon.jar` Lifecycle**
    - `start_dp_return_watcher()` reuses a single persistent `adb shell` stream (falling back to one-shot `dev.shell` only if the pipe dies) to avoid spawning thousands of `adb.exe` processes during long multi-screen sessions.
+   - On `PBT_APMSUSPEND`, active TV hooks and sockets are torn down immediately so wake never freezes input; on `PBT_APMRESUMEAUTOMATIC`/`PBT_APMRESUMESUSPEND` (3s debounced) or unexpected `WM_CONTROL_EXITED` (Wi-Fi drop), bounded backoff recovery runs `DeviceController::reconnect_force()` (`adb disconnect` + `connect`) and silently restores into safe `TvStandby` (never stealing PC focus) or cleanly exits via `WM_DP_RETURNED` if the TV already switched back to DP.
    - `ActivityThread.systemMain()` spawns non-daemon binder threads inside `app_process`. Both `MiTVDaemon.java` and `MiTVEdge.java` MUST call `System.exit(0)` after `Q`/EOF!
    - `DeviceController` keeps `MiTVDaemon` warm ONLY while flyout is open or a TV session is active, and auto-shuts it down after 25s idle (`DAEMON_IDLE_SECS = 25`), plus explicit `stop_daemon_now()` on exit.
 

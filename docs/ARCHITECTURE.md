@@ -13,10 +13,10 @@ MiKVM 刻意保持**零重型框架**架构（无 Electron / Tauri / WebView2 / 
 | `src/config.rs` | `config.ini` 读写（兼容 UTF-8 BOM）、`assets/` 与 `scrcpy/`（含系统 `PATH`）路径解析、系统浅色/深色主题查询、开机自启注册表 | 主体跨平台（仅自启/主题为 Win32） |
 | `src/adb.rs` | ADB 命令执行、设备状态合并查询、自动校验并推送 `assets/*.jar`、常驻按键 shell 管道、`MiTVDaemon` 单队列合并与按需保活工作线程 | **跨平台**（仅隐藏窗口 flag 为 Win32） |
 | `src/scrcpy_proto.rs` | 纯 Rust 直连 `scrcpy-server` 控制通道（`adb forward` + TCP）、UHID 67 字节虚拟相对鼠标、VelocityControl 预激发单帧突发移动、Android 按键/组合键注入与双向剪贴板报文 | **100% 跨平台** |
-| `src/display.rs` | `QueryDisplayConfig` 多屏拓扑检测、小米/红米 EDID（`0xA961`）识别、笔记本合盖通知（`GUID_LIDSWITCH_STATE_CHANGE`）、多屏防幽灵弹窗定位、可选临时切「仅电脑屏幕」与还原 | 平台层（Windows） |
+| `src/display.rs` | `QueryDisplayConfig` 多屏拓扑检测、小米/红米 EDID（`0xA961`）识别、合盖与系统休眠/唤醒事件（`WM_POWERBROADCAST`）、多屏防幽灵弹窗定位、可选临时切「仅电脑屏幕」与还原 | 平台层（Windows） |
 | `src/clipboard.rs` | Win32 `CF_UNICODETEXT` 读写与密码管理器隐私剪贴板格式过滤（`ExcludeClipboardContentFromMonitorProcessing` / `CanIncludeInClipboardHistory`） | 平台层（Windows） |
 | `src/keymap.rs` | 12 个可映射动作模型（含 `ToggleFocus` 焦点切换）、`KeyChord` 解析与格式化、预设 1/2、冲突与防误录校验 | **跨平台**（键码表抽象即可移植） |
-| `src/takeover.rs` | 4 态多屏 KVM 状态机（`Idle` / `TvLocked` / `TvFocused` / `TvStandby`）、`WM_INPUT` 原始鼠标增量、`HELD_MODS` 独立修饰键隔离、5 连 Shift 粘滞键抑制、电脑端弹性阻力边界与电视端 `MiTVEdge` 联动、常驻 shell `DP Watcher` | 平台层（Windows） |
+| `src/takeover/` | 模块化 4 态多屏 KVM 子系统：`mod.rs`（状态机总控与休眠/断网自愈）、`state.rs`（共享原子态与修饰键/吞键位图）、`hooks.rs`（`WH_KEYBOARD_LL`/`WH_MOUSE_LL`/`WM_INPUT`/粘滞键抑制）、`edge.rs`（电脑阻力墙 + `MiTVEdge` + `3.0x` 预激发单帧对齐）、`dp_watcher.rs`（常驻 shell DP 监听） | 平台层（Windows） |
 | `src/gdi.rs` / `src/flyout.rs` | 双缓冲 GDI+ Win11 圆角浮窗（自动跟随系统浅色/深色主题与任务栏配色）、矢量图标绘制、35ms 实时节流滑块、红点点击重连 | 平台层（Windows） |
 | `src/settings_ui.rs` / `src/keymap_ui.rs` | 原生 Win32 ComCtl32 v6 多屏设置窗口（含深色标题栏与控件主题）与临时低级钩子按键录制窗口 | 平台层（Windows） |
 | `src/main.rs` | 单实例互斥锁、系统托盘消息循环（`WM_INPUT` / `WM_DISPLAYCHANGE` / `WM_POWERBROADCAST` / `WM_SETTINGCHANGE`）与各子系统调度中枢 | 平台层（Windows） |
@@ -79,6 +79,9 @@ MiKVM 放弃了外挂 `scrcpy.exe` 隐形窗口方案，改由 Rust 原生客户
   - 按 `ToggleFocus`（默认 `Ctrl+Alt+S`）在 PC 与电视间切换时，双方各自保留上次离开时的光标位置；进入电视前通过 `SendInput` 干净释放电脑端按住的组合修饰键，防止切屏卡键。
   - 每次切入电视按需将电脑新剪贴板推送至电视（跳过含密码管理器隐私标记的剪贴板），电视复制文本时通过 `DEV_TYPE_CLIPBOARD` 自动同步回电脑。
 - **常驻 shell `DP Watcher`**：单条长连 `adb shell` 循环检测 `ExternalSourceActivity`，免除高频拉起短命 `adb.exe` 进程，在电视界面切回 DP 时毫秒级自动释控并还原临时显示配置。
+- **休眠唤醒与 Wi-Fi 瞬断自愈**：
+  - `PBT_APMSUSPEND` 挂起前自动释放钩子与长连管道，防止唤醒卡死；`PBT_APMRESUMEAUTOMATIC` / `PBT_APMRESUMESUSPEND` 唤醒后（3 秒防抖）清理僵尸 ADB 管道，待网卡恢复后静默探测电视信号源，若仍在电视系统则自动恢复会话至安全的 `TvStandby` 待命态（不抢占电脑焦点）。
+  - Wi-Fi 瞬断导致控制通道意外断开（`WM_CONTROL_EXITED`）时，立刻归还电脑键鼠控制权，后台按 `1s → 2s → 4s` 退避执行 `adb disconnect` + `connect` 强制重连；若检测到显示器已回 DP 则正常收尾，若仍在电视则无感恢复待命，3 次仍失败才退出并托盘提示。
 
 ### 2.4 `MiTVEdge` 文本协议（stdin / stdout）
 
@@ -144,7 +147,7 @@ Key.Power=Ctrl+Alt+P
 
 ## 5. 发布检查清单
 
-1. 本地 `cargo build --release` 保证 **0 error、0 warning**，并通过 `objdump -p` 确认仅依赖 Windows 系统内置 DLL。
+1. 本地 `cargo test` 全部通过，`cargo build --release` 保证 **0 error、0 warning**，并通过 `objdump -p` 确认仅依赖 Windows 系统内置 DLL。
 2. 确认没有把个人 `config.ini`、`scrcpy/`、`*.exe`、`*.jks` 提交进仓库（`git status` 干净）。
 3. 更新版本号（`Cargo.toml`、`assets/app.manifest`），提交并推送目标分支。
 4. 打附注标签推送：`git tag -a vX.Y.Z -m "..." && git push origin vX.Y.Z`，GitHub Actions 将自动编译并发布 `MiKVM-windows-x64-full.zip`、`MiKVM-windows-x64-lite.zip` 与 `SHA256SUMS.txt`。
