@@ -11,6 +11,7 @@ mod flyout;
 mod gdi;
 mod keymap;
 mod keymap_ui;
+mod lan_scan;
 mod scrcpy_proto;
 mod settings_ui;
 mod takeover;

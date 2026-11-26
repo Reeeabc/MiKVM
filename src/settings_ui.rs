@@ -3,9 +3,11 @@ use crate::config::{from_wide, is_autostart_enabled, set_autostart, to_wide, App
 use crate::display::visible_work_area_for_cursor;
 use crate::gdi::{apply_dark_control_theme, apply_dwm_dark_titlebar, ThemePalette};
 use crate::keymap_ui::show_keymap_window;
+use crate::lan_scan::{scan_lan_adb_devices, DiscoveredDevice};
 use crate::takeover::current_mode;
 use std::cell::RefCell;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -15,6 +17,7 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::{BST_CHECKED, BST_UNCHECKED};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const SETTINGS_CLASS: &str = "MiKVMSettingsWnd";
@@ -22,6 +25,7 @@ const ID_EDIT_ADDR: i32 = 201;
 const ID_BTN_TEST: i32 = 202;
 const ID_LBL_STATUS: i32 = 203;
 const ID_CHK_TAKEOVER: i32 = 204;
+const ID_BTN_SCAN: i32 = 205;
 const ID_CHK_AUTOSTART: i32 = 206;
 const ID_BTN_SAVE: i32 = 207;
 const ID_BTN_CANCEL: i32 = 208;
@@ -38,6 +42,9 @@ const ID_LBL_CHK_AUTO_INT: i32 = 232;
 const ID_EDIT_RES_PC: i32 = 240;
 const ID_EDIT_RES_TV: i32 = 241;
 const WM_TEST_DONE: u32 = WM_APP + 50;
+const WM_SCAN_DONE: u32 = WM_APP + 51;
+
+static SCAN_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 const BM_GETCHECK: u32 = 0x00F0;
 const BM_SETCHECK: u32 = 0x00F1;
@@ -205,8 +212,9 @@ where
         };
 
         make_ctrl("STATIC", "电视无线 ADB 地址 (IP:端口)：", 0, 0, pad, sc(16.0), inner, sc(20.0), 0);
-        make_ctrl("EDIT", &addr, WS_EX_CLIENTEDGE, ES_AUTOHSCROLL | WS_TABSTOP, pad, sc(42.0), inner - sc(96.0), sc(28.0), ID_EDIT_ADDR);
-        make_ctrl("BUTTON", "测试连接", 0, WS_TABSTOP, cw - pad - sc(88.0), sc(41.0), sc(88.0), sc(30.0), ID_BTN_TEST);
+        make_ctrl("EDIT", &addr, WS_EX_CLIENTEDGE, ES_AUTOHSCROLL | WS_TABSTOP, pad, sc(42.0), inner - sc(174.0), sc(28.0), ID_EDIT_ADDR);
+        make_ctrl("BUTTON", "扫描设备", 0, WS_TABSTOP, cw - pad - sc(166.0), sc(41.0), sc(78.0), sc(30.0), ID_BTN_SCAN);
+        make_ctrl("BUTTON", "测试连接", 0, WS_TABSTOP, cw - pad - sc(82.0), sc(41.0), sc(82.0), sc(30.0), ID_BTN_TEST);
         make_ctrl("STATIC", "", 0, 0, pad, sc(74.0), inner, sc(18.0), ID_LBL_STATUS);
 
         let chk_to = make_checkbox("切换到「电视系统」时自动开启直连键鼠控制", sc(96.0), ID_CHK_TAKEOVER, ID_LBL_CHK_TAKEOVER);
@@ -328,6 +336,38 @@ unsafe extern "system" fn settings_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp
                     }
                     0
                 }
+                ID_BTN_SCAN => {
+                    if SCAN_IN_PROGRESS.swap(true, Ordering::AcqRel) {
+                        return 0;
+                    }
+                    let hint = get_edit_text(hwnd, ID_EDIT_ADDR);
+                    let lbl = GetDlgItem(hwnd, ID_LBL_STATUS);
+                    let btn = GetDlgItem(hwnd, ID_BTN_SCAN);
+                    if !btn.is_null() {
+                        EnableWindow(btn, 0);
+                    }
+                    SetWindowTextW(lbl, to_wide("正在扫描局域网 5555 无线 ADB 设备...").as_ptr());
+                    let dev = SETTINGS_STATE.with(|c| c.borrow().as_ref().map(|s| Arc::clone(&s.dev)));
+                    if let Some(dev) = dev {
+                        let hwnd_raw = hwnd as usize;
+                        std::thread::spawn(move || {
+                            let found = scan_lan_adb_devices(&dev, &hint);
+                            let boxed = Box::into_raw(Box::new(found)) as LPARAM;
+                            let posted = PostMessageW(hwnd_raw as HWND, WM_SCAN_DONE, 0, boxed);
+                            if posted == 0 {
+                                // Window closed before scan completed: free cleanly & clear guard
+                                let _ = Box::from_raw(boxed as *mut Vec<DiscoveredDevice>);
+                                SCAN_IN_PROGRESS.store(false, Ordering::Release);
+                            }
+                        });
+                    } else {
+                        SCAN_IN_PROGRESS.store(false, Ordering::Release);
+                        if !btn.is_null() {
+                            EnableWindow(btn, 1);
+                        }
+                    }
+                    0
+                }
                 ID_BTN_TEST => {
                     let raw = get_edit_text(hwnd, ID_EDIT_ADDR);
                     let addr = AppConfig::normalize_address(&raw);
@@ -431,6 +471,40 @@ unsafe extern "system" fn settings_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp
                 "连接失败，请检查电视 IP、同一局域网及 ADB 开关"
             };
             SetWindowTextW(lbl, to_wide(txt).as_ptr());
+            0
+        }
+        WM_SCAN_DONE => {
+            SCAN_IN_PROGRESS.store(false, Ordering::Release);
+            let btn = GetDlgItem(hwnd, ID_BTN_SCAN);
+            if !btn.is_null() {
+                EnableWindow(btn, 1);
+            }
+            let lbl = GetDlgItem(hwnd, ID_LBL_STATUS);
+            if lp != 0 {
+                let found = Box::from_raw(lp as *mut Vec<DiscoveredDevice>);
+                if let Some(best) = found.first() {
+                    let edit = GetDlgItem(hwnd, ID_EDIT_ADDR);
+                    if !edit.is_null() {
+                        SetWindowTextW(edit, to_wide(&best.addr).as_ptr());
+                    }
+                    let msg = if found.len() == 1 {
+                        format!("已发现: {} ({})，点保存生效", best.addr, best.label)
+                    } else {
+                        format!(
+                            "发现 {} 台，已填入 {} ({})",
+                            found.len(),
+                            best.addr,
+                            best.label
+                        )
+                    };
+                    SetWindowTextW(lbl, to_wide(&msg).as_ptr());
+                } else {
+                    SetWindowTextW(
+                        lbl,
+                        to_wide("未发现局域网 5555 无线 ADB 设备，请确认同网段").as_ptr(),
+                    );
+                }
+            }
             0
         }
         WM_CLOSE => {
