@@ -457,3 +457,47 @@ fn name_to_vk(name: &str) -> Option<u16> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_chord_parse_format_roundtrip() {
+        for raw in ["Ctrl+Alt+D", "Ctrl+Shift+S", "Esc", "Home", "F12", "PgUp", "Alt+Up"] {
+            let parsed = KeyChord::parse(raw).expect("should parse valid chord");
+            assert_eq!(parsed.format(), raw);
+        }
+        assert!(KeyChord::parse("").is_none());
+        assert!(KeyChord::parse("none").is_none());
+        assert!(KeyChord::parse("-").is_none());
+        // Bare typing key without Ctrl/Alt must be rejected by validate_chord
+        assert!(KeyChord::parse("A").is_none());
+        assert!(KeyChord::parse("Shift+A").is_none());
+        assert!(KeyChord::parse("Up").is_none());
+    }
+
+    #[test]
+    fn presets_are_valid_and_conflict_free() {
+        for km in [KeyMap::preset_1(), KeyMap::preset_2()] {
+            for act in ALL_ACTIONS {
+                let chord = km.get(act).expect("preset should bind every action");
+                assert!(validate_chord(chord).is_ok());
+                assert_eq!(km.find_conflict(act, chord), None);
+                assert_eq!(km.match_event(chord.mods, chord.vk), Some(act));
+            }
+        }
+    }
+
+    #[test]
+    fn conflict_detection_and_standby_global_flags() {
+        let km = KeyMap::default();
+        let dp_chord = km.get(KeyAction::ReturnDp).unwrap();
+        assert_eq!(km.find_conflict(KeyAction::ToggleFocus, dp_chord), Some(KeyAction::ReturnDp));
+        assert!(KeyAction::ReturnDp.is_standby_global());
+        assert!(KeyAction::ToggleFocus.is_standby_global());
+        assert!(!KeyAction::Back.is_standby_global());
+        assert!(KeyAction::ReturnDp.is_required());
+        assert!(!KeyAction::ToggleFocus.is_required());
+    }
+}

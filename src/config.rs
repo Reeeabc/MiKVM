@@ -350,3 +350,78 @@ pub fn set_autostart(enable: bool) {
         RegCloseKey(hkey);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keymap::KeyAction;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_ini(tag: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!("mikvm_test_{}_{}_{}.ini", tag, std::process::id(), nanos))
+    }
+
+    #[test]
+    fn normalize_address_adds_default_port() {
+        assert_eq!(AppConfig::normalize_address("192.168.1.200"), "192.168.1.200:5555");
+        assert_eq!(AppConfig::normalize_address("  192.168.1.200:5566  "), "192.168.1.200:5566");
+        assert_eq!(AppConfig::normalize_address("   "), "");
+    }
+
+    #[test]
+    fn wide_string_roundtrip() {
+        let s = "MiKVM 电视待命 (焦点在电脑)";
+        let w = to_wide(s);
+        assert_eq!(w.last(), Some(&0));
+        assert_eq!(from_wide(&w), s);
+    }
+
+    #[test]
+    fn config_bom_clamp_and_roundtrip() {
+        let path = temp_ini("bom");
+        let content = "\u{FEFF}TvAddress=10.0.0.8:5555\r\n\
+                       AutoTakeoverOnTv=False\r\n\
+                       WheelAsDpad=False\r\n\
+                       EdgeSwitch=True\r\n\
+                       EdgeResistancePc=9999\r\n\
+                       EdgeResistanceTv=-50\r\n\
+                       ClipboardSync=False\r\n\
+                       AutoInternalOnTv=True\r\n\
+                       TvEdgeSide=Right\r\n\
+                       Key.ReturnDp=\r\n\
+                       Key.Voice=\r\n\
+                       Key.ToggleFocus=Ctrl+Shift+S\r\n";
+        fs::write(&path, content).expect("write temp ini");
+
+        let cfg = AppConfig::load(path.clone());
+        assert_eq!(cfg.tv_address, "10.0.0.8:5555");
+        assert!(!cfg.auto_takeover_on_tv);
+        assert!(cfg.edge_switch);
+        assert_eq!(cfg.edge_resistance_pc, 300);
+        assert_eq!(cfg.edge_resistance_tv, 0);
+        assert!(!cfg.clipboard_sync);
+        assert!(cfg.auto_internal_on_tv);
+        assert_eq!(cfg.tv_edge_side, EdgeSide::Right);
+        // Required action ignores empty value; optional action clears cleanly
+        assert!(cfg.keymap.get(KeyAction::ReturnDp).is_some());
+        assert!(cfg.keymap.get(KeyAction::Voice).is_none());
+        assert_eq!(
+            cfg.keymap.get(KeyAction::ToggleFocus).map(|c| c.format()).as_deref(),
+            Some("Ctrl+Shift+S")
+        );
+
+        cfg.save();
+        let reloaded = AppConfig::load(path.clone());
+        assert_eq!(reloaded.tv_address, cfg.tv_address);
+        assert_eq!(reloaded.edge_resistance_pc, 300);
+        assert_eq!(reloaded.edge_resistance_tv, 0);
+        assert_eq!(reloaded.tv_edge_side, EdgeSide::Right);
+        assert!(reloaded.keymap.get(KeyAction::Voice).is_none());
+
+        let _ = fs::remove_file(&path);
+    }
+}

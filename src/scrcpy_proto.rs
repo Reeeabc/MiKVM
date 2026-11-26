@@ -807,3 +807,66 @@ pub unsafe fn android_metastate_from_held(held: u16) -> i32 {
     }
     m
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_token_validation() {
+        assert!(is_valid_version_token("3.3.1"));
+        assert!(is_valid_version_token("5.0.1"));
+        assert!(is_valid_version_token("3.2-rc1"));
+        assert!(!is_valid_version_token(""));
+        assert!(!is_valid_version_token("v3.3.1"));
+        assert!(!is_valid_version_token("3.3 1"));
+    }
+
+    #[test]
+    fn parse_cli_and_mismatch_versions() {
+        let cli = "scrcpy 5.0.1 <https://github.com/Genymobile/scrcpy>\n\nDependencies:";
+        assert_eq!(parse_scrcpy_cli_version(cli).as_deref(), Some("5.0.1"));
+        assert_eq!(parse_scrcpy_cli_version("scrcpy 3.3.1\n").as_deref(), Some("3.3.1"));
+        assert_eq!(parse_scrcpy_cli_version("not scrcpy"), None);
+
+        let mismatch = "ERROR: The server version (3.3.1) does not match the client (0.0.0)";
+        assert_eq!(parse_server_mismatch_version(mismatch).as_deref(), Some("3.3.1"));
+        assert_eq!(parse_server_mismatch_version("unrelated stderr"), None);
+    }
+
+    #[test]
+    fn uhid_mouse_and_keycode_packets() {
+        let m = build_uhid_mouse_packet(MOUSE_BTN_LEFT | MOUSE_BTN_RIGHT, -127, -1, 1, -2);
+        assert_eq!(m[0], TYPE_UHID_INPUT);
+        assert_eq!(&m[1..3], &UHID_MOUSE_ID.to_be_bytes());
+        assert_eq!(&m[3..5], &5u16.to_be_bytes());
+        assert_eq!(m[5], 0x03);
+        assert_eq!(m[6], 0x81); // -127i8
+        assert_eq!(m[7], 0xFF); // -1i8
+        assert_eq!(m[8], 0x01);
+        assert_eq!(m[9], 0xFE); // -2i8
+
+        let k = build_inject_keycode_packet(ACTION_DOWN, 66, 0, AMETA_CTRL_ON | AMETA_CTRL_LEFT_ON);
+        assert_eq!(k[0], TYPE_INJECT_KEYCODE);
+        assert_eq!(k[1], ACTION_DOWN);
+        assert_eq!(i32::from_be_bytes([k[2], k[3], k[4], k[5]]), 66);
+        assert_eq!(i32::from_be_bytes([k[6], k[7], k[8], k[9]]), 0);
+        assert_eq!(
+            i32::from_be_bytes([k[10], k[11], k[12], k[13]]),
+            AMETA_CTRL_ON | AMETA_CTRL_LEFT_ON
+        );
+    }
+
+    #[test]
+    fn vk_to_android_mapping_essentials() {
+        assert_eq!(vk_to_android_keycode(b'A' as u16, false), Some(29));
+        assert_eq!(vk_to_android_keycode(b'Z' as u16, false), Some(54));
+        assert_eq!(vk_to_android_keycode(b'0' as u16, false), Some(7));
+        assert_eq!(vk_to_android_keycode(VK_F12, false), Some(142));
+        assert_eq!(vk_to_android_keycode(VK_RETURN, false), Some(66));
+        assert_eq!(vk_to_android_keycode(VK_RETURN, true), Some(160));
+        assert_eq!(vk_to_android_keycode(VK_ESCAPE, false), Some(111));
+        assert_eq!(vk_to_android_keycode(VK_BACK, false), Some(67));
+        assert_eq!(vk_to_android_keycode(0xFFFF, false), None);
+    }
+}

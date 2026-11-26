@@ -116,3 +116,17 @@ pub(super) fn spawn_dp_return_watcher(
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::is_external_source_focus;
+
+    #[test]
+    fn external_source_focus_detection() {
+        let dp_out = "  mCurrentFocus=Window{2872f13 u0 com.xiaomi.mitv.tvplayer/com.xiaomi.mitv.tvplayer.ExternalSourceActivity}\n";
+        assert!(is_external_source_focus(dp_out));
+        let tv_out = "  mCurrentFocus=Window{1e2106e u0 app.orchard.tv/app.orchard.tv.MainActivity}\n";
+        assert!(!is_external_source_focus(tv_out));
+        assert!(!is_external_source_focus(""));
+    }
+}

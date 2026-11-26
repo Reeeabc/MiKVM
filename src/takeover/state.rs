@@ -206,3 +206,45 @@ pub(super) fn get_tick_count() -> u32 {
 extern "system" {
     fn GetTickCount() -> u32;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn takeover_mode_transitions_and_flags() {
+        assert_eq!(TakeoverMode::from_u8(0), TakeoverMode::Idle);
+        assert_eq!(TakeoverMode::from_u8(1), TakeoverMode::TvLocked);
+        assert_eq!(TakeoverMode::from_u8(2), TakeoverMode::TvFocused);
+        assert_eq!(TakeoverMode::from_u8(3), TakeoverMode::TvStandby);
+        assert_eq!(TakeoverMode::from_u8(99), TakeoverMode::Idle);
+
+        assert!(!TakeoverMode::Idle.is_session_active());
+        assert!(!TakeoverMode::Idle.is_tv_capturing());
+        assert!(TakeoverMode::TvLocked.is_tv_capturing());
+        assert!(TakeoverMode::TvFocused.is_tv_capturing());
+        assert!(TakeoverMode::TvStandby.is_session_active());
+        assert!(!TakeoverMode::TvStandby.is_tv_capturing());
+    }
+
+    #[test]
+    fn tv_strip_side_is_opposite_of_pc_edge() {
+        assert_eq!(tv_strip_for_pc_edge(EdgeSide::Left), (TV_SIDE_RIGHT, "RIGHT"));
+        assert_eq!(tv_strip_for_pc_edge(EdgeSide::Right), (TV_SIDE_LEFT, "LEFT"));
+        assert_eq!(tv_strip_for_pc_edge(EdgeSide::Top), (TV_SIDE_BOTTOM, "BOTTOM"));
+        assert_eq!(tv_strip_for_pc_edge(EdgeSide::Bottom), (TV_SIDE_TOP, "TOP"));
+    }
+
+    #[test]
+    fn swallowed_vk_bitset_operations() {
+        swallowed_reset_all();
+        assert!(!swallowed_is_set(0x53));
+        assert!(!swallowed_test_and_set(0x53));
+        assert!(swallowed_is_set(0x53));
+        assert!(swallowed_test_and_set(0x53));
+        assert!(swallowed_clear(0x53));
+        assert!(!swallowed_is_set(0x53));
+        assert!(!swallowed_clear(0x53));
+        assert!(!swallowed_is_set(300));
+    }
+}

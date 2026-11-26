@@ -564,3 +564,50 @@ unsafe extern "system" fn edge_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
         _ => DefWindowProcW(hwnd, msg, wp, lp),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn primed_counts_exact_3x_rounding() {
+        // 1080px screen, 3.00x acceleration:
+        // -50% (-540px) / 3.0 = -180 counts
+        assert_eq!(compute_primed_counts(-5000, 1080, 300), -180);
+        // +50% (+540px) / 3.0 = +180 counts
+        assert_eq!(compute_primed_counts(5000, 1080, 300), 180);
+        // -900px / 3.0 = -300 counts
+        assert_eq!(compute_primed_counts(-8333, 1080, 300), -300);
+        // Small delta -18px / 3.0 = -6 counts
+        assert_eq!(compute_primed_counts(-167, 1080, 300), -6);
+        assert_eq!(compute_primed_counts(0, 1080, 300), 0);
+        // Acceleration clamp bounds (100..=500)
+        assert_eq!(compute_primed_counts(5000, 1000, 50), 500);
+        assert_eq!(compute_primed_counts(5000, 1000, 900), 100);
+    }
+
+    #[test]
+    fn pc_entry_ratio_vertical_and_horizontal() {
+        let laptop = RECT { left: 3840, top: 559, right: 6400, bottom: 2159 };
+        // Exact midpoint of 1600px tall monitor
+        assert_eq!(
+            compute_pc_entry_ratio_10k(EdgeSide::Left, laptop, POINT { x: 3820, y: 1359 }),
+            5000
+        );
+        // Clamped above top / below bottom
+        assert_eq!(
+            compute_pc_entry_ratio_10k(EdgeSide::Left, laptop, POINT { x: 3820, y: 0 }),
+            0
+        );
+        assert_eq!(
+            compute_pc_entry_ratio_10k(EdgeSide::Right, laptop, POINT { x: 6420, y: 9999 }),
+            10000
+        );
+        // Horizontal seam with negative coordinates
+        let top_mon = RECT { left: -2000, top: 0, right: 0, bottom: 1000 };
+        assert_eq!(
+            compute_pc_entry_ratio_10k(EdgeSide::Top, top_mon, POINT { x: -500, y: -5 }),
+            7500
+        );
+    }
+}
