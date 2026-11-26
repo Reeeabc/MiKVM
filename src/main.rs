@@ -18,7 +18,7 @@ use crate::config::{
     AppConfig, DeviceStatus, SignalSource,
 };
 use crate::display::{
-    parse_lid_power_broadcast, register_lid_notification, unregister_lid_notification,
+    parse_power_broadcast, register_lid_notification, unregister_lid_notification, PowerEvent,
 };
 use crate::flyout::{
     create_flyout, hide_flyout, is_flyout_visible, refresh_flyout_theme,
@@ -29,8 +29,8 @@ use crate::gdi::{create_tray_icon, GdipGuard};
 use crate::settings_ui::show_settings_window;
 use crate::takeover::{
     current_mode, handle_raw_input, TakeoverMode, TakeoverSession, WM_CONTROL_EXITED,
-    WM_CONTROL_READY, WM_DP_RETURNED, WM_EDGE_ENTER_TV, WM_TRIGGER_RETURN_DP,
-    WM_TRIGGER_TOGGLE_FOCUS, WM_TV_CLIPBOARD, WM_TV_EDGE_EXIT,
+    WM_CONTROL_READY, WM_DP_RETURNED, WM_EDGE_ENTER_TV, WM_RECOVERY_FAILED,
+    WM_TRIGGER_RETURN_DP, WM_TRIGGER_TOGGLE_FOCUS, WM_TV_CLIPBOARD, WM_TV_EDGE_EXIT,
 };
 use std::cell::RefCell;
 use std::ptr;
@@ -277,25 +277,34 @@ fn update_tray_visual() {
             .lock()
             .map(|c| (c.keymap.return_dp_label(), c.keymap.toggle_focus_label()))
             .unwrap_or_else(|_| ("Ctrl+Alt+D".to_string(), "Ctrl+Alt+S".to_string()));
+        let recovering = h
+            .takeover
+            .lock()
+            .map(|t| t.is_recovering())
+            .unwrap_or(false);
         let icon = if mode.is_tv_capturing() {
             h.active_icon
         } else {
             h.idle_icon
         };
-        (h.hwnd, icon, dp_key, focus_key)
+        (h.hwnd, icon, dp_key, focus_key, recovering)
     });
-    if let Some((hwnd, icon, dp_key, focus_key)) = info {
-        let tip = match mode {
-            TakeoverMode::TvFocused => {
-                format!("MiKVM 控制电视中 ({} 切电脑 / {} 回DP)", focus_key, dp_key)
+    if let Some((hwnd, icon, dp_key, focus_key, recovering)) = info {
+        let tip = if recovering {
+            "MiKVM 网络波动，正在后台静默重连电视...".to_string()
+        } else {
+            match mode {
+                TakeoverMode::TvFocused => {
+                    format!("MiKVM 控制电视中 ({} 切电脑 / {} 回DP)", focus_key, dp_key)
+                }
+                TakeoverMode::TvLocked => {
+                    format!("MiKVM 单屏独占电视 ({} 切回电脑 DP)", dp_key)
+                }
+                TakeoverMode::TvStandby => {
+                    format!("MiKVM 电视待命 · 焦点在电脑 (滑边或 {} 切入)", focus_key)
+                }
+                TakeoverMode::Idle => "MiKVM — 信号源 / 背光 / 多屏键鼠控制".to_string(),
             }
-            TakeoverMode::TvLocked => {
-                format!("MiKVM 单屏独占电视 ({} 切回电脑 DP)", dp_key)
-            }
-            TakeoverMode::TvStandby => {
-                format!("MiKVM 电视待命 · 焦点在电脑 (滑边或 {} 切入)", focus_key)
-            }
-            TakeoverMode::Idle => "MiKVM — 信号源 / 背光 / 多屏键鼠控制".to_string(),
         };
         unsafe {
             set_tray_icon_state(hwnd, icon, &tip, false);
@@ -368,8 +377,13 @@ fn exit_app() {
 
 unsafe fn show_right_click_menu(hwnd: HWND) {
     let mode = current_mode();
-    let running = with_host(|h| h.takeover.lock().map(|t| t.is_running()).unwrap_or(false))
-        .unwrap_or(false);
+    let running = with_host(|h| {
+        h.takeover
+            .lock()
+            .map(|t| t.is_running() || t.is_recovering())
+            .unwrap_or(false)
+    })
+    .unwrap_or(false);
     let menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, IDM_OPEN, to_wide("打开控制面板").as_ptr());
     AppendMenuW(menu, MF_SEPARATOR, 0, ptr::null());
@@ -427,14 +441,24 @@ unsafe extern "system" fn host_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             0
         }
         WM_POWERBROADCAST => {
-            if let Some(lid_open) = parse_lid_power_broadcast(msg, wp, lp) {
+            if let Some(ev) = parse_power_broadcast(msg, wp, lp) {
                 let to_opt = with_host(|h| Arc::clone(&h.takeover));
+                let mut should_refresh = false;
                 if let Some(to) = to_opt {
                     if let Ok(mut g) = to.lock() {
-                        g.on_lid_state_changed(lid_open);
+                        match ev {
+                            PowerEvent::LidChanged(lid_open) => g.on_lid_state_changed(lid_open),
+                            PowerEvent::Suspend => g.on_power_suspend_ui(),
+                            PowerEvent::Resume => {
+                                should_refresh = g.on_power_resume_ui();
+                            }
+                        }
                     }
                 }
                 update_tray_visual();
+                if should_refresh && is_flyout_visible() {
+                    trigger_refresh(true);
+                }
             }
             1
         }
@@ -500,7 +524,11 @@ unsafe extern "system" fn host_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                     let to_opt = with_host(|h| Arc::clone(&h.takeover));
                     let running = to_opt
                         .as_ref()
-                        .and_then(|t| t.lock().ok().map(|g| g.is_running()))
+                        .and_then(|t| {
+                            t.lock()
+                                .ok()
+                                .map(|g| g.is_running() || g.is_recovering())
+                        })
                         .unwrap_or(false);
                     if running {
                         if let Some(to) = to_opt {
@@ -566,10 +594,11 @@ unsafe extern "system" fn host_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             0
         }
         WM_CONTROL_READY => {
+            let prefer_standby = wp != 0;
             let to_opt = with_host(|h| Arc::clone(&h.takeover));
             if let Some(to) = to_opt {
                 if let Ok(mut g) = to.lock() {
-                    g.on_control_ready_ui();
+                    g.on_control_ready_ui(prefer_standby);
                 }
             }
             update_tray_visual();
@@ -579,10 +608,31 @@ unsafe extern "system" fn host_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             let to_opt = with_host(|h| Arc::clone(&h.takeover));
             if let Some(to) = to_opt {
                 if let Ok(mut g) = to.lock() {
+                    g.on_control_exited_ui();
+                }
+            }
+            update_tray_visual();
+            0
+        }
+        WM_RECOVERY_FAILED => {
+            let notify = wp != 0;
+            let to_opt = with_host(|h| Arc::clone(&h.takeover));
+            if let Some(to) = to_opt {
+                if let Ok(mut g) = to.lock() {
                     g.stop();
                 }
             }
             update_tray_visual();
+            if notify {
+                show_tray_balloon(
+                    hwnd,
+                    "MiKVM",
+                    "电视连接已断开，后台自动重连失败，可点击托盘重连",
+                );
+            }
+            if is_flyout_visible() {
+                trigger_refresh(false);
+            }
             0
         }
         WM_DP_RETURNED => {

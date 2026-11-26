@@ -24,6 +24,7 @@ pub const WM_TRIGGER_TOGGLE_FOCUS: u32 = WM_APP + 15;
 pub const WM_EDGE_ENTER_TV: u32 = WM_APP + 16;
 pub const WM_TV_CLIPBOARD: u32 = WM_APP + 17;
 pub const WM_TV_EDGE_EXIT: u32 = WM_APP + 18;
+pub const WM_RECOVERY_FAILED: u32 = WM_APP + 19;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]

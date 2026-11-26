@@ -252,6 +252,50 @@ impl DeviceController {
         self.test_connect(&addr)
     }
 
+    /// Drops zombie persistent ADB pipes (e.g. after PC sleep/resume or Wi-Fi drop)
+    /// so subsequent commands reconnect cleanly without hanging on dead sockets.
+    pub fn reset_stale_connections(&self) {
+        self.stop_persistent_shell();
+        self.reset_jar_cache();
+    }
+
+    /// Forces a fresh wireless ADB session: if `get-state` is not `device`, runs `adb disconnect`
+    /// first to clear Windows half-open/offline TCP sockets before reconnecting.
+    pub fn reconnect_force(&self) -> bool {
+        let addr = self.tv_address();
+        if addr.is_empty() {
+            return false;
+        }
+        let (_, st, _) = self.run_adb(&["-s", &addr, "get-state"], 1500);
+        if st.trim() == "device" {
+            let (rc, echo_out, _) = self.run_adb(&["-s", &addr, "shell", "echo ok"], 2000);
+            if rc == 0 && echo_out.trim() == "ok" {
+                return true;
+            }
+        }
+        let _ = self.run_adb(&["disconnect", &addr], 1500);
+        let (_, out, err) = self.run_adb(&["connect", &addr], 3500);
+        let combined = format!("{} {}", out, err).to_ascii_lowercase();
+        if combined.contains("connected to") || combined.contains("already connected") {
+            let (_, st2, _) = self.run_adb(&["-s", &addr, "get-state"], 2000);
+            return st2.trim() == "device";
+        }
+        false
+    }
+
+    /// Lightweight probe of whether the TV is currently displaying its built-in Android TV UI
+    /// (`Some(true)`), an external source like DP/HDMI (`Some(false)`), or unreachable (`None`).
+    pub fn is_tv_on_tv_system(&self) -> Option<bool> {
+        let (rc, out, _) = self.shell(
+            "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'",
+            2500,
+        );
+        if rc != 0 || out.trim().is_empty() {
+            return None;
+        }
+        Some(!out.to_ascii_lowercase().contains("externalsourceactivity"))
+    }
+
     pub fn ensure_jars_deployed(&self) {
         if self.jars_verified.lock().map(|g| *g).unwrap_or(false) {
             return;

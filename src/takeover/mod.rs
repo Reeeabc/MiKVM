@@ -6,8 +6,8 @@ mod state;
 pub use hooks::handle_raw_input;
 pub use state::{
     current_mode, TakeoverMode, WM_CONTROL_EXITED, WM_CONTROL_READY, WM_DP_RETURNED,
-    WM_EDGE_ENTER_TV, WM_TRIGGER_RETURN_DP, WM_TRIGGER_TOGGLE_FOCUS, WM_TV_CLIPBOARD,
-    WM_TV_EDGE_EXIT,
+    WM_EDGE_ENTER_TV, WM_RECOVERY_FAILED, WM_TRIGGER_RETURN_DP, WM_TRIGGER_TOGGLE_FOCUS,
+    WM_TV_CLIPBOARD, WM_TV_EDGE_EXIT,
 };
 
 use crate::adb::DeviceController;
@@ -34,7 +34,8 @@ use std::path::PathBuf;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT};
+use std::time::Duration;
+use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 pub struct TakeoverSession {
@@ -44,10 +45,14 @@ pub struct TakeoverSession {
     dev: Arc<DeviceController>,
     host_hwnd: usize,
     edge_hwnd: usize,
-    client: Mutex<Option<Arc<ScrcpyControlClient>>>,
+    client: Arc<Mutex<Option<Arc<ScrcpyControlClient>>>>,
     edge_sensor: Arc<Mutex<Option<TvEdgeSensor>>>,
     edge_sensor_gen: Arc<AtomicU32>,
     watch_stop: Mutex<Option<Arc<AtomicBool>>>,
+    recovery_gen: Arc<AtomicU32>,
+    recovering: Arc<AtomicBool>,
+    suspended_was_active: bool,
+    last_resume_tick: u32,
     lid_open: AtomicBool,
     topo: DisplayTopology,
     saved_display: SavedDisplayConfig,
@@ -104,10 +109,14 @@ impl TakeoverSession {
             dev,
             host_hwnd: host_hwnd as usize,
             edge_hwnd: edge_hwnd as usize,
-            client: Mutex::new(None),
+            client: Arc::new(Mutex::new(None)),
             edge_sensor: Arc::new(Mutex::new(None)),
             edge_sensor_gen: Arc::new(AtomicU32::new(0)),
             watch_stop: Mutex::new(None),
+            recovery_gen: Arc::new(AtomicU32::new(0)),
+            recovering: Arc::new(AtomicBool::new(false)),
+            suspended_was_active: false,
+            last_resume_tick: 0,
             lid_open: AtomicBool::new(true),
             topo,
             saved_display: SavedDisplayConfig::default(),
@@ -136,6 +145,10 @@ impl TakeoverSession {
 
     pub fn is_lid_open(&self) -> bool {
         self.lid_open.load(Ordering::Acquire)
+    }
+
+    pub fn is_recovering(&self) -> bool {
+        self.recovering.load(Ordering::Acquire)
     }
 
     pub fn sync_config(&mut self) {
@@ -177,6 +190,8 @@ impl TakeoverSession {
 
     /// Blocking connect called on background worker thread; posts WM_CONTROL_READY on success.
     pub fn start_control_blocking(&self) -> Result<(), String> {
+        self.recovery_gen.fetch_add(1, Ordering::AcqRel);
+        self.recovering.store(false, Ordering::Release);
         if self.is_running() {
             unsafe {
                 PostMessageW(self.host_hwnd as HWND, WM_CONTROL_READY, 0, 0);
@@ -190,39 +205,20 @@ impl TakeoverSession {
             .map(|c| c.tv_address.clone())
             .unwrap_or_default();
 
-        let host_clip = self.host_hwnd;
-        let host_exit = self.host_hwnd;
-
-        let client = ScrcpyControlClient::connect(
+        connect_and_install_client(
             &self.dev,
-            self.adb_path.clone(),
+            &self.adb_path,
             server_path,
             addr,
-            move |text| {
-                let boxed = Box::into_raw(Box::new(text)) as LPARAM;
-                unsafe {
-                    PostMessageW(host_clip as HWND, WM_TV_CLIPBOARD, 0, boxed);
-                }
-            },
-            move || unsafe {
-                PostMessageW(host_exit as HWND, WM_CONTROL_EXITED, 0, 0);
-            },
-        )?;
-
-        if let Ok(mut g) = self.client.lock() {
-            *g = Some(Arc::clone(&client));
-        }
-        if let Ok(mut gg) = GLOBAL_CLIENT.lock() {
-            *gg = Some(client);
-        }
-
-        unsafe {
-            PostMessageW(self.host_hwnd as HWND, WM_CONTROL_READY, 0, 0);
-        }
-        Ok(())
+            self.host_hwnd,
+            &self.client,
+            false,
+        )
     }
 
-    pub fn on_control_ready_ui(&mut self) {
+    pub fn on_control_ready_ui(&mut self, prefer_standby: bool) {
+        self.recovering.store(false, Ordering::Release);
+        self.suspended_was_active = false;
         self.sync_config();
         let (auto_internal, tv_hint) = self
             .cfg
@@ -242,11 +238,163 @@ impl TakeoverSession {
         self.dev.set_keep_warm(true);
 
         if self.topo.has_visible_pc() {
-            self.enter_mode(TakeoverMode::TvFocused);
+            if prefer_standby {
+                self.enter_mode(TakeoverMode::TvStandby);
+            } else {
+                self.enter_mode(TakeoverMode::TvFocused);
+            }
         } else {
             self.enter_mode(TakeoverMode::TvLocked);
         }
         self.start_edge_sensor_async();
+        if prefer_standby {
+            self.start_dp_return_watcher();
+        }
+    }
+
+    /// Unexpected control channel disconnect (e.g. Wi-Fi drop):
+    /// immediately releases PC hooks so Windows never freezes, then runs bounded silent recovery.
+    pub fn on_control_exited_ui(&mut self) {
+        if !self.mode().is_session_active() || self.recovering.load(Ordering::Acquire) {
+            return;
+        }
+        self.teardown_transport_keep_display();
+        self.spawn_recovery_worker(&[1000, 2000, 4000], true);
+    }
+
+    /// PC entering sleep/hibernation: cleanly release hooks and close live sockets so wake never hangs.
+    pub fn on_power_suspend_ui(&mut self) {
+        let was_active = self.mode().is_session_active() || self.recovering.load(Ordering::Acquire);
+        self.suspended_was_active = was_active;
+        self.recovery_gen.fetch_add(1, Ordering::AcqRel);
+        self.recovering.store(false, Ordering::Release);
+        if was_active {
+            self.teardown_transport_keep_display();
+        }
+        let dev = Arc::clone(&self.dev);
+        std::thread::spawn(move || dev.reset_stale_connections());
+    }
+
+    /// PC resumed from sleep: debounce duplicate resume events, reset stale ADB pipes,
+    /// and silently recover active TV sessions once Wi-Fi re-associates.
+    /// Returns `true` if a non-session silent status refresh should be triggered.
+    pub fn on_power_resume_ui(&mut self) -> bool {
+        let now = get_tick_count();
+        if self.last_resume_tick != 0 && now.wrapping_sub(self.last_resume_tick) < 3000 {
+            return false;
+        }
+        self.last_resume_tick = now;
+        self.refresh_topology();
+
+        if self.suspended_was_active {
+            self.suspended_was_active = false;
+            self.spawn_recovery_worker(&[2000, 3000, 4000], false);
+            return false;
+        }
+        let dev = Arc::clone(&self.dev);
+        std::thread::spawn(move || dev.reset_stale_connections());
+        true
+    }
+
+    fn teardown_transport_keep_display(&mut self) {
+        self.enter_mode(TakeoverMode::Idle);
+        self.stop_edge_sensor();
+        self.stop_dp_return_watcher();
+        self.dev.stop_persistent_shell();
+        self.dev.set_keep_warm(false);
+
+        if let Ok(mut gg) = GLOBAL_CLIENT.lock() {
+            *gg = None;
+        }
+        if let Ok(mut g) = self.client.lock() {
+            if let Some(c) = g.take() {
+                c.close();
+            }
+        }
+    }
+
+    fn spawn_recovery_worker(&self, backoffs_ms: &[u64], notify_on_fail: bool) {
+        let gen = self.recovery_gen.fetch_add(1, Ordering::AcqRel) + 1;
+        self.recovering.store(true, Ordering::Release);
+
+        let gen_ref = Arc::clone(&self.recovery_gen);
+        let recovering_ref = Arc::clone(&self.recovering);
+        let dev = Arc::clone(&self.dev);
+        let adb_path = self.adb_path.clone();
+        let server_path = self.scrcpy_dir.join("scrcpy-server");
+        let addr = self
+            .cfg
+            .lock()
+            .map(|c| c.tv_address.clone())
+            .unwrap_or_default();
+        let host = self.host_hwnd;
+        let client_slot = Arc::clone(&self.client);
+        let schedule = backoffs_ms.to_vec();
+
+        std::thread::spawn(move || {
+            let cancelled = || gen_ref.load(Ordering::Acquire) != gen;
+
+            for (attempt, &delay_ms) in schedule.iter().enumerate() {
+                let mut slept = 0u64;
+                while slept < delay_ms {
+                    if cancelled() {
+                        return;
+                    }
+                    let step = (delay_ms - slept).min(150);
+                    std::thread::sleep(Duration::from_millis(step));
+                    slept += step;
+                }
+                if cancelled() {
+                    return;
+                }
+                if attempt == 0 {
+                    dev.reset_stale_connections();
+                }
+                if !dev.reconnect_force() || cancelled() {
+                    continue;
+                }
+                match dev.is_tv_on_tv_system() {
+                    Some(false) => {
+                        // Display already switched back to DP/HDMI while offline
+                        recovering_ref.store(false, Ordering::Release);
+                        if !cancelled() {
+                            unsafe {
+                                PostMessageW(host as HWND, WM_DP_RETURNED, 0, 0);
+                            }
+                        }
+                        return;
+                    }
+                    Some(true) => {
+                        if connect_and_install_client(
+                            &dev,
+                            &adb_path,
+                            server_path.clone(),
+                            addr.clone(),
+                            host,
+                            &client_slot,
+                            true,
+                        )
+                        .is_ok()
+                        {
+                            return;
+                        }
+                    }
+                    None => {}
+                }
+            }
+
+            if !cancelled() {
+                recovering_ref.store(false, Ordering::Release);
+                unsafe {
+                    PostMessageW(
+                        host as HWND,
+                        WM_RECOVERY_FAILED,
+                        if notify_on_fail { 1 } else { 0 },
+                        0,
+                    );
+                }
+            }
+        });
     }
 
     fn capture_pc_cursor_if_visible(&mut self) {
@@ -731,20 +879,10 @@ impl TakeoverSession {
     }
 
     pub fn stop(&mut self) {
-        self.enter_mode(TakeoverMode::Idle);
-        self.stop_edge_sensor();
-        self.stop_dp_return_watcher();
-        self.dev.stop_persistent_shell();
-        self.dev.set_keep_warm(false);
-
-        if let Ok(mut gg) = GLOBAL_CLIENT.lock() {
-            *gg = None;
-        }
-        if let Ok(mut g) = self.client.lock() {
-            if let Some(c) = g.take() {
-                c.close();
-            }
-        }
+        self.recovery_gen.fetch_add(1, Ordering::AcqRel);
+        self.recovering.store(false, Ordering::Release);
+        self.suspended_was_active = false;
+        self.teardown_transport_keep_display();
         self.saved_display.restore_if_needed();
     }
 
@@ -756,4 +894,50 @@ impl TakeoverSession {
             self.raw_input_active = enable;
         }
     }
+}
+
+fn connect_and_install_client(
+    dev: &Arc<DeviceController>,
+    adb_path: &PathBuf,
+    server_path: PathBuf,
+    addr: String,
+    host_hwnd: usize,
+    client_slot: &Arc<Mutex<Option<Arc<ScrcpyControlClient>>>>,
+    prefer_standby: bool,
+) -> Result<(), String> {
+    let host_clip = host_hwnd;
+    let host_exit = host_hwnd;
+
+    let client = ScrcpyControlClient::connect(
+        dev,
+        adb_path.clone(),
+        server_path,
+        addr,
+        move |text| {
+            let boxed = Box::into_raw(Box::new(text)) as LPARAM;
+            unsafe {
+                PostMessageW(host_clip as HWND, WM_TV_CLIPBOARD, 0, boxed);
+            }
+        },
+        move || unsafe {
+            PostMessageW(host_exit as HWND, WM_CONTROL_EXITED, 0, 0);
+        },
+    )?;
+
+    if let Ok(mut g) = client_slot.lock() {
+        *g = Some(Arc::clone(&client));
+    }
+    if let Ok(mut gg) = GLOBAL_CLIENT.lock() {
+        *gg = Some(client);
+    }
+
+    unsafe {
+        PostMessageW(
+            host_hwnd as HWND,
+            WM_CONTROL_READY,
+            if prefer_standby { 1 } else { 0 } as WPARAM,
+            0,
+        );
+    }
+    Ok(())
 }

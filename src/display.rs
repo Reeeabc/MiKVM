@@ -608,24 +608,40 @@ pub fn unregister_lid_notification(handle: HPOWERNOTIFY) {
     }
 }
 
-pub fn parse_lid_power_broadcast(msg: u32, wp: WPARAM, lp: LPARAM) -> Option<bool> {
-    if msg != WM_POWERBROADCAST || wp as u32 != PBT_POWERSETTINGCHANGE || lp == 0 {
+const PBT_APMSUSPEND_ID: u32 = 0x0004;
+const PBT_APMRESUMESUSPEND_ID: u32 = 0x0007;
+const PBT_APMRESUMEAUTOMATIC_ID: u32 = 0x0012;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PowerEvent {
+    LidChanged(bool),
+    Suspend,
+    Resume,
+}
+
+pub fn parse_power_broadcast(msg: u32, wp: WPARAM, lp: LPARAM) -> Option<PowerEvent> {
+    if msg != WM_POWERBROADCAST {
         return None;
     }
-    unsafe {
-        let pbs = &*(lp as *const POWERBROADCAST_SETTING);
-        let g = pbs.PowerSetting;
-        if g.data1 == GUID_LIDSWITCH_STATE_CHANGE.data1
-            && g.data2 == GUID_LIDSWITCH_STATE_CHANGE.data2
-            && g.data3 == GUID_LIDSWITCH_STATE_CHANGE.data3
-            && g.data4 == GUID_LIDSWITCH_STATE_CHANGE.data4
-            && pbs.DataLength >= 1
-        {
-            let val = pbs.Data[0];
-            return Some(val != 0);
-        }
+    match wp as u32 {
+        PBT_APMSUSPEND_ID => Some(PowerEvent::Suspend),
+        PBT_APMRESUMEAUTOMATIC_ID | PBT_APMRESUMESUSPEND_ID => Some(PowerEvent::Resume),
+        PBT_POWERSETTINGCHANGE if lp != 0 => unsafe {
+            let pbs = &*(lp as *const POWERBROADCAST_SETTING);
+            let g = pbs.PowerSetting;
+            if g.data1 == GUID_LIDSWITCH_STATE_CHANGE.data1
+                && g.data2 == GUID_LIDSWITCH_STATE_CHANGE.data2
+                && g.data3 == GUID_LIDSWITCH_STATE_CHANGE.data3
+                && g.data4 == GUID_LIDSWITCH_STATE_CHANGE.data4
+                && pbs.DataLength >= 1
+            {
+                let val = pbs.Data[0];
+                return Some(PowerEvent::LidChanged(val != 0));
+            }
+            None
+        },
+        _ => None,
     }
-    None
 }
 
 /// Optional helper: temporarily switch Windows to "PC screen only" when entering TV mode,
@@ -720,5 +736,39 @@ impl SavedDisplayConfig {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_suspend_and_resume_broadcasts() {
+        assert_eq!(
+            parse_power_broadcast(WM_POWERBROADCAST, PBT_APMSUSPEND_ID as WPARAM, 0),
+            Some(PowerEvent::Suspend)
+        );
+        assert_eq!(
+            parse_power_broadcast(WM_POWERBROADCAST, PBT_APMRESUMEAUTOMATIC_ID as WPARAM, 0),
+            Some(PowerEvent::Resume)
+        );
+        assert_eq!(
+            parse_power_broadcast(WM_POWERBROADCAST, PBT_APMRESUMESUSPEND_ID as WPARAM, 0),
+            Some(PowerEvent::Resume)
+        );
+        assert_eq!(parse_power_broadcast(0, PBT_APMSUSPEND_ID as WPARAM, 0), None);
+        assert_eq!(
+            parse_power_broadcast(WM_POWERBROADCAST, PBT_POWERSETTINGCHANGE as WPARAM, 0),
+            None
+        );
+    }
+
+    #[test]
+    fn edge_side_roundtrip() {
+        for side in [EdgeSide::Left, EdgeSide::Right, EdgeSide::Top, EdgeSide::Bottom] {
+            assert_eq!(EdgeSide::parse(side.as_str()), Some(side));
+        }
+        assert_eq!(EdgeSide::parse("invalid"), None);
     }
 }
