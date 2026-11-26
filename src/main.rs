@@ -3,6 +3,8 @@
 mod adb;
 mod clipboard;
 mod config;
+#[macro_use]
+mod diag;
 mod display;
 mod flyout;
 mod gdi;
@@ -714,7 +716,24 @@ fn main() {
         base.join("config.ini")
     };
 
-    let cfg = Arc::new(Mutex::new(AppConfig::load(cfg_path)));
+    let cfg_dir = cfg_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| base.clone());
+    let loaded_cfg = AppConfig::load(cfg_path);
+    let cli_debug = std::env::args().any(|a| a.eq_ignore_ascii_case("--debug-log"));
+    diag::init(cfg_dir.join("mikvm.log"), loaded_cfg.debug_log || cli_debug);
+    diag_log!(
+        "APP",
+        "start addr={} edge={} res_pc={} res_tv={} auto_int={}",
+        loaded_cfg.tv_address,
+        loaded_cfg.edge_switch,
+        loaded_cfg.edge_resistance_pc,
+        loaded_cfg.edge_resistance_tv,
+        loaded_cfg.auto_internal_on_tv
+    );
+
+    let cfg = Arc::new(Mutex::new(loaded_cfg));
     let scrcpy_dir = resolve_scrcpy_dir(&base);
     let assets_dir = resolve_asset_dir(&base);
     let adb_path = scrcpy_dir.join("adb.exe");

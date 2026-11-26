@@ -247,6 +247,7 @@ impl ScrcpyControlClient {
         // 3. Auto-detect exact scrcpy-server version and launch control-only server (retry once via
         //    on-device version probe if sibling scrcpy.exe version ever disagrees with scrcpy-server)
         let mut server_ver = detect_scrcpy_server_version(dev, &server_jar_path, local_size, false);
+        diag_log!("SCRCPY", "connect addr={} ver={} port={}", tv_addr, server_ver, local_port);
         let mut stream_opt: Option<TcpStream> = None;
         let mut child_opt: Option<Child> = None;
 

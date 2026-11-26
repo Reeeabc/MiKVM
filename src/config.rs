@@ -93,6 +93,7 @@ pub struct AppConfig {
     pub edge_resistance_tv: i32,
     pub clipboard_sync: bool,
     pub auto_internal_on_tv: bool,
+    pub debug_log: bool,
     pub tv_monitor_hint: String,
     pub tv_edge_side: EdgeSide,
     pub dp_input: i32,
@@ -112,6 +113,7 @@ impl AppConfig {
             edge_resistance_tv: 180,
             clipboard_sync: true,
             auto_internal_on_tv: false,
+            debug_log: false,
             tv_monitor_hint: "Mi Monitor".to_string(),
             tv_edge_side: EdgeSide::Left,
             dp_input: 29,
@@ -160,6 +162,10 @@ impl AppConfig {
                         if let Ok(b) = v.to_ascii_lowercase().parse::<bool>() {
                             cfg.auto_internal_on_tv = b;
                         }
+                    } else if k.eq_ignore_ascii_case("DebugLog") {
+                        if let Ok(b) = v.to_ascii_lowercase().parse::<bool>() {
+                            cfg.debug_log = b;
+                        }
                     } else if k.eq_ignore_ascii_case("TvMonitorHint") {
                         cfg.tv_monitor_hint = v.to_string();
                     } else if k.eq_ignore_ascii_case("TvEdgeSide") {
@@ -205,6 +211,7 @@ impl AppConfig {
              EdgeResistanceTv={}\r\n\
              ClipboardSync={}\r\n\
              AutoInternalOnTv={}\r\n\
+             DebugLog={}\r\n\
              TvMonitorHint={}\r\n\
              TvEdgeSide={}\r\n\
              DpInput={}\r\n\
@@ -218,6 +225,7 @@ impl AppConfig {
             self.edge_resistance_tv.clamp(0, 300),
             if self.clipboard_sync { "True" } else { "False" },
             if self.auto_internal_on_tv { "True" } else { "False" },
+            if self.debug_log { "True" } else { "False" },
             self.tv_monitor_hint,
             self.tv_edge_side.as_str(),
             self.dp_input,

@@ -258,6 +258,7 @@ impl TakeoverSession {
         if !self.mode().is_session_active() || self.recovering.load(Ordering::Acquire) {
             return;
         }
+        diag_log!("RESIL", "control channel exited unexpectedly; starting backoff recovery");
         self.teardown_transport_keep_display();
         self.spawn_recovery_worker(&[1000, 2000, 4000], true);
     }
@@ -265,6 +266,7 @@ impl TakeoverSession {
     /// PC entering sleep/hibernation: cleanly release hooks and close live sockets so wake never hangs.
     pub fn on_power_suspend_ui(&mut self) {
         let was_active = self.mode().is_session_active() || self.recovering.load(Ordering::Acquire);
+        diag_log!("POWER", "suspend was_active={}", was_active);
         self.suspended_was_active = was_active;
         self.recovery_gen.fetch_add(1, Ordering::AcqRel);
         self.recovering.store(false, Ordering::Release);
@@ -285,6 +287,7 @@ impl TakeoverSession {
         }
         self.last_resume_tick = now;
         self.refresh_topology();
+        diag_log!("POWER", "resume suspended_was_active={}", self.suspended_was_active);
 
         if self.suspended_was_active {
             self.suspended_was_active = false;
@@ -576,6 +579,7 @@ impl TakeoverSession {
         if self.mode() != TakeoverMode::TvStandby {
             return;
         }
+        diag_log!("EDGE", "PC -> TV ratio_10k={}", entry_ratio_10k);
         self.refresh_topology();
         self.capture_last_pc_window();
         // Save matching PC edge point in case the user later returns via hotkey
@@ -595,6 +599,7 @@ impl TakeoverSession {
         if self.mode() != TakeoverMode::TvFocused {
             return;
         }
+        diag_log!("EDGE", "TV -> PC ratio_10k={}", y_ratio_10k);
         self.refresh_topology();
         if !self.topo.has_visible_pc() {
             return;
@@ -651,6 +656,9 @@ impl TakeoverSession {
 
     fn enter_mode(&mut self, next: TakeoverMode) {
         let prev = self.mode();
+        if prev != next {
+            diag_log!("MODE", "{:?} -> {:?} visible_pc={}", prev, next, self.topo.visible_pc_monitors.len());
+        }
 
         // When entering TV capture from PC (Idle/TvStandby), flush any held Windows modifiers
         // BEFORE switching MODE_ATOMIC so Windows never gets stuck with Ctrl/Shift/Alt held!
