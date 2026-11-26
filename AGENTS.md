@@ -66,7 +66,7 @@ MiKVM/
 │   └── VolDirectTool.jar          # Fallback AudioManager volume tool (MIT, redmi-g-pro-27u-monitorswitch)
 ├── docs/
 │   ├── ARCHITECTURE.md            # Detailed human-facing architecture & macOS porting guide
-│   └── screenshots/               # README showcase screenshots (flyout.jpg, settings.png, keymap.jpg)
+│   └── screenshots/               # README showcase screenshots (flyout.jpg, settings.jpg, keymap.jpg)
 ├── extras/
 │   └── Fcitx5TvFix/               # Optional Xposed/Vector module source fixing Fcitx5 on HyperOS TV
 ├── .github/workflows/release.yml  # CI build + automatic dual-zip GitHub Release publisher
