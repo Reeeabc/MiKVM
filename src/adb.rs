@@ -174,6 +174,13 @@ impl DeviceController {
         self.cfg.lock().map(|c| c.tv_address.clone()).unwrap_or_default()
     }
 
+    fn tv_monitor_hint(&self) -> String {
+        self.cfg
+            .lock()
+            .map(|c| c.tv_monitor_hint.clone())
+            .unwrap_or_else(|_| "Mi Monitor".to_string())
+    }
+
     pub fn run_adb(&self, args: &[&str], timeout_ms: u64) -> (i32, String, String) {
         if !self.adb_path.exists() {
             return (-1, String::new(), "adb.exe not found".to_string());
@@ -415,6 +422,7 @@ impl DeviceController {
     fn slider_worker_loop(&self) {
         let mut last_activity = Instant::now();
         let mut pending_bl_sync: Option<(i32, Instant)> = None;
+        let mut last_bl_used_mtk = false;
 
         loop {
             let task = {
@@ -500,17 +508,28 @@ impl DeviceController {
                     }
                 }
                 if !(0..=100).contains(&cur) {
+                    let hint = self.tv_monitor_hint();
+                    if let Some(bl) = crate::ddc::get_brightness(&hint) {
+                        cur = bl;
+                        self.cached_bl.store(bl, Ordering::Relaxed);
+                    }
+                }
+                if !(0..=100).contains(&cur) {
                     cur = 50;
                 }
                 let next = (cur + task.step_bl_delta).clamp(0, 100);
                 self.cached_bl.store(next, Ordering::Relaxed);
-                self.write_backlight_fast(next);
-                pending_bl_sync = Some((next, Instant::now() + Duration::from_millis(450)));
+                last_bl_used_mtk = self.write_backlight_fast(next);
+                if last_bl_used_mtk {
+                    pending_bl_sync = Some((next, Instant::now() + Duration::from_millis(450)));
+                } else {
+                    pending_bl_sync = None;
+                }
                 last_activity = Instant::now();
             }
 
             if let Some(v) = task.backlight {
-                self.write_backlight_fast(v);
+                last_bl_used_mtk = self.write_backlight_fast(v);
                 last_activity = Instant::now();
             }
 
@@ -521,7 +540,9 @@ impl DeviceController {
 
             if let Some(v) = task.sync_backlight {
                 pending_bl_sync = None;
-                self.sync_backlight_settings(v);
+                if last_bl_used_mtk {
+                    self.sync_backlight_settings(v);
+                }
                 last_activity = Instant::now();
             } else if let Some((v, at)) = pending_bl_sync {
                 if Instant::now() >= at {
@@ -545,20 +566,29 @@ impl DeviceController {
         }
     }
 
-    fn write_backlight_fast(&self, v: i32) {
+    /// Writes hardware backlight (0..=100). Returns `true` if written via TV-side MTK register
+    /// (requiring delayed system PQ settings sync), `false` if handled rootlessly via DDC/CI or failed.
+    fn write_backlight_fast(&self, v: i32) -> bool {
         if let Some(resp) = self.daemon_cmd(&format!("B {}", v)) {
             if resp.starts_with("OK") {
-                return;
+                return true;
             }
         }
-        // Fallback if MiTVDaemon unavailable
+        // Rootless DDC/CI path (instant hardware brightness on DP/HDMI without Root!)
+        let hint = self.tv_monitor_hint();
+        if crate::ddc::set_brightness(&hint, v) {
+            return false;
+        }
+        // Fallback if MiTVDaemon & DDC/CI both unavailable (rooted MTK direct tool)
         if self.ensure_connected() {
             let cmd = format!(
                 "su 1000 -c 'CLASSPATH=/data/local/tmp/MtkDirectTool.jar /system/bin/app_process /data/local/tmp MtkDirectTool set g_disp__disp_back_light {} 3' >/dev/null 2>&1",
                 v
             );
-            let _ = self.shell(&cmd, 3000);
+            let (rc, _, _) = self.shell(&cmd, 3000);
+            return rc == 0;
         }
+        false
     }
 
     fn write_volume_fast(&self, v: i32) {
@@ -673,6 +703,15 @@ impl DeviceController {
         } else {
             SignalSource::Dp
         };
+
+        // Rootless DDC/CI backlight readout fallback when TV is unrooted and displaying PC input
+        if st.backlight.is_none() && st.active_source != SignalSource::TvSystem {
+            let hint = self.tv_monitor_hint();
+            if let Some(bl) = crate::ddc::get_brightness(&hint) {
+                st.backlight = Some(bl);
+                self.cached_bl.store(bl, Ordering::Relaxed);
+            }
+        }
 
         st
     }

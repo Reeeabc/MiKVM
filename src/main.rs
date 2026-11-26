@@ -1,10 +1,11 @@
 #![windows_subsystem = "windows"]
 
+#[macro_use]
+mod diag;
 mod adb;
 mod clipboard;
 mod config;
-#[macro_use]
-mod diag;
+mod ddc;
 mod display;
 mod flyout;
 mod gdi;

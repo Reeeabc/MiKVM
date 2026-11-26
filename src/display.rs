@@ -232,6 +232,21 @@ fn target_matches_tv(t: &RawTarget, hint_lower: &str) -> bool {
     false
 }
 
+/// Finds the desktop rectangle of the target Xiaomi/Redmi monitor across Extend, Duplicate,
+/// and Second-screen-only topologies (used by rootless DDC/CI brightness control).
+pub fn find_tv_monitor_rect(tv_hint: &str) -> Option<RECT> {
+    let raw = query_active_targets();
+    let hint_lower = tv_hint.trim().to_ascii_lowercase();
+    if let Some(t) = raw.iter().find(|t| target_matches_tv(t, &hint_lower)) {
+        return Some(t.rect);
+    }
+    let externals: Vec<&RawTarget> = raw.iter().filter(|t| !t.is_internal).collect();
+    if externals.len() == 1 {
+        return Some(externals[0].rect);
+    }
+    None
+}
+
 pub fn query_display_topology(
     tv_hint: &str,
     lid_open: bool,
