@@ -74,7 +74,7 @@ MiKVM/
     ├── main.rs                    # Single-instance mutex, tray host, WM_INPUT/DISPLAY/POWER/SETTING hub
     ├── config.rs                  # config.ini loader/saver (UTF-8 BOM safe), theme query, PATH discovery, autostart
     ├── adb.rs                     # ADB runner, status query, size-checked jar deploy, MiTVDaemon coalesced worker
-    ├── scrcpy_proto.rs            # Direct scrcpy-server 5.0.1 TCP client, UHID mouse, primed burst, keys, clipboard
+    ├── scrcpy_proto.rs            # Direct scrcpy-server 3.0+ TCP client, UHID mouse, primed burst, keys, clipboard
     ├── display.rs                 # QueryDisplayConfig topology, Xiaomi EDID 0xA961, lid notify, SavedDisplayConfig
     ├── clipboard.rs               # Win32 CF_UNICODETEXT sync with password-manager privacy format filtering
     ├── takeover.rs                # 4-state multi-screen KVM, Raw Input, HELD_MODS, StickyKeysGuard, MiTVEdge, DP Watcher
