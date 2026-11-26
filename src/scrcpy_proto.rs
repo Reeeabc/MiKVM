@@ -10,8 +10,104 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
-const SCRCPY_SERVER_VERSION: &str = "5.0.1";
+const FALLBACK_SCRCPY_VERSION: &str = "3.3.1";
 const REMOTE_SERVER_PATH: &str = "/data/local/tmp/scrcpy-server.jar";
+
+// Cached `(server_jar_path, file_size, detected_version)` so repeated connects have 0ms overhead.
+static CACHED_SERVER_VER: Mutex<Option<(PathBuf, u64, String)>> = Mutex::new(None);
+
+fn is_valid_version_token(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 32
+        && s.as_bytes()[0].is_ascii_digit()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_')
+}
+
+fn parse_scrcpy_cli_version(out: &str) -> Option<String> {
+    let first = out.lines().next()?.trim();
+    let mut parts = first.split_whitespace();
+    if !parts.next()?.eq_ignore_ascii_case("scrcpy") {
+        return None;
+    }
+    let ver = parts.next()?.trim();
+    if is_valid_version_token(ver) {
+        Some(ver.to_string())
+    } else {
+        None
+    }
+}
+
+fn parse_server_mismatch_version(out: &str) -> Option<String> {
+    let marker = "The server version (";
+    let start = out.find(marker)? + marker.len();
+    let rest = &out[start..];
+    let end = rest.find(')')?;
+    let ver = rest[..end].trim();
+    if is_valid_version_token(ver) {
+        Some(ver.to_string())
+    } else {
+        None
+    }
+}
+
+fn probe_scrcpy_version_on_device(dev: &Arc<DeviceController>) -> Option<String> {
+    let cmd = format!(
+        "CLASSPATH={} app_process / com.genymobile.scrcpy.Server 0.0.0 2>&1",
+        REMOTE_SERVER_PATH
+    );
+    let (_, out, err) = dev.shell(&cmd, 2500);
+    parse_server_mismatch_version(&out).or_else(|| parse_server_mismatch_version(&err))
+}
+
+fn detect_scrcpy_server_version(
+    dev: &Arc<DeviceController>,
+    server_jar_path: &PathBuf,
+    local_size: u64,
+    force_device_probe: bool,
+) -> String {
+    if !force_device_probe {
+        if let Ok(g) = CACHED_SERVER_VER.lock() {
+            if let Some((ref p, sz, ref v)) = *g {
+                if p == server_jar_path && sz == local_size {
+                    return v.clone();
+                }
+            }
+        }
+        // Fast local detection via sibling `scrcpy.exe --version` (~15ms, works for any scrcpy release)
+        if let Some(dir) = server_jar_path.parent() {
+            let cli = dir.join("scrcpy.exe");
+            if cli.exists() {
+                if let Ok(out) = Command::new(&cli)
+                    .arg("--version")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .output()
+                {
+                    let text = String::from_utf8_lossy(&out.stdout);
+                    if let Some(ver) = parse_scrcpy_cli_version(&text) {
+                        if let Ok(mut g) = CACHED_SERVER_VER.lock() {
+                            *g = Some((server_jar_path.clone(), local_size, ver.clone()));
+                        }
+                        return ver;
+                    }
+                }
+            }
+        }
+    }
+
+    // Universal fallback: ask deployed `scrcpy-server.jar` directly (works even without scrcpy.exe!)
+    if let Some(ver) = probe_scrcpy_version_on_device(dev) {
+        if let Ok(mut g) = CACHED_SERVER_VER.lock() {
+            *g = Some((server_jar_path.clone(), local_size, ver.clone()));
+        }
+        return ver;
+    }
+
+    FALLBACK_SCRCPY_VERSION.to_string()
+}
 
 // ControlMessage types (verified from scrcpy-server 5.0.1 classes.dex)
 const TYPE_INJECT_KEYCODE: u8 = 0;
@@ -148,51 +244,74 @@ impl ScrcpyControlClient {
             return Err(format!("adb forward 失败: {}", fwd_err.trim()));
         }
 
-        // 3. Launch scrcpy-server on TV (control-only, no video, no audio, zero encoding overhead)
-        let shell_cmd = format!(
-            "CLASSPATH={} app_process / com.genymobile.scrcpy.Server {} scid={} log_level=warn video=false audio=false control=true tunnel_forward=true send_device_meta=false send_dummy_byte=true cleanup=false clipboard_autosync=true",
-            REMOTE_SERVER_PATH, SCRCPY_SERVER_VERSION, scid_hex
-        );
-        let mut child = Command::new(&adb_path)
-            .args(["-s", &tv_addr, "shell", &shell_cmd])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .map_err(|e| format!("无法启动 scrcpy-server: {}", e))?;
-
-        // 4. Handshake: retry connecting until dummy byte 0x00 arrives from server
-        let deadline = Instant::now() + Duration::from_millis(4500);
+        // 3. Auto-detect exact scrcpy-server version and launch control-only server (retry once via
+        //    on-device version probe if sibling scrcpy.exe version ever disagrees with scrcpy-server)
+        let mut server_ver = detect_scrcpy_server_version(dev, &server_jar_path, local_size, false);
         let mut stream_opt: Option<TcpStream> = None;
+        let mut child_opt: Option<Child> = None;
 
-        while Instant::now() < deadline {
-            if let Ok(Some(_)) = child.try_wait() {
+        for attempt in 0..2 {
+            let shell_cmd = format!(
+                "CLASSPATH={} app_process / com.genymobile.scrcpy.Server {} scid={} log_level=warn video=false audio=false control=true tunnel_forward=true send_device_meta=false send_dummy_byte=true cleanup=false clipboard_autosync=true",
+                REMOTE_SERVER_PATH, server_ver, scid_hex
+            );
+            let mut child = Command::new(&adb_path)
+                .args(["-s", &tv_addr, "shell", &shell_cmd])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn()
+                .map_err(|e| format!("无法启动 scrcpy-server: {}", e))?;
+
+            // 4. Handshake: retry connecting until dummy byte 0x00 arrives from server
+            let deadline = Instant::now() + Duration::from_millis(4500);
+            let mut exited_early = false;
+
+            while Instant::now() < deadline {
+                if let Ok(Some(_)) = child.try_wait() {
+                    exited_early = true;
+                    break;
+                }
+                if let Ok(mut st) = TcpStream::connect(("127.0.0.1", local_port)) {
+                    let _ = st.set_nodelay(true);
+                    let _ = st.set_read_timeout(Some(Duration::from_millis(250)));
+                    let mut dummy = [0u8; 1];
+                    match st.read(&mut dummy) {
+                        Ok(1) => {
+                            let _ = st.set_read_timeout(None);
+                            stream_opt = Some(st);
+                            break;
+                        }
+                        _ => {
+                            drop(st);
+                        }
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(40));
+            }
+
+            if stream_opt.is_some() {
+                child_opt = Some(child);
+                break;
+            }
+
+            let _ = child.kill();
+            let _ = child.wait();
+
+            if exited_early && attempt == 0 {
+                let probed = detect_scrcpy_server_version(dev, &server_jar_path, local_size, true);
+                if probed != server_ver {
+                    server_ver = probed;
+                    continue;
+                }
                 let _ = dev.run_adb(&["-s", &tv_addr, "forward", "--remove", &local_spec], 1500);
                 return Err("scrcpy-server 异常退出，请确认电视 ADB 正常连接".to_string());
             }
-            if let Ok(mut st) = TcpStream::connect(("127.0.0.1", local_port)) {
-                let _ = st.set_nodelay(true);
-                let _ = st.set_read_timeout(Some(Duration::from_millis(250)));
-                let mut dummy = [0u8; 1];
-                match st.read(&mut dummy) {
-                    Ok(1) => {
-                        let _ = st.set_read_timeout(None);
-                        stream_opt = Some(st);
-                        break;
-                    }
-                    _ => {
-                        // Either EOF (server not listening yet) or short timeout
-                        drop(st);
-                    }
-                }
-            }
-            std::thread::sleep(Duration::from_millis(40));
+            break;
         }
 
-        let Some(writer) = stream_opt else {
-            let _ = child.kill();
-            let _ = child.wait();
+        let (Some(writer), Some(child)) = (stream_opt, child_opt) else {
             let _ = dev.run_adb(&["-s", &tv_addr, "forward", "--remove", &local_spec], 1500);
             return Err("连接 scrcpy-server 控制通道超时".to_string());
         };

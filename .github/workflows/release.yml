@@ -44,10 +44,10 @@ jobs:
       - name: Package full & lite release archives
         shell: pwsh
         run: |
-          # 1. Lite package (binary + assets + docs, ~130 KB)
+          # 1. Lite package (binary + assets + docs)
           New-Item -ItemType Directory -Force -Path dist/MiKVM-lite/assets | Out-Null
           Copy-Item target/release/MiKVM.exe dist/MiKVM-lite/MiKVM.exe
-          Copy-Item assets/MiTVDaemon.jar, assets/MtkDirectTool.jar, assets/VolDirectTool.jar dist/MiKVM-lite/assets/
+          Copy-Item assets/MiTVDaemon.jar, assets/MiTVEdge.jar, assets/MtkDirectTool.jar, assets/VolDirectTool.jar dist/MiKVM-lite/assets/
           Copy-Item config.example.ini, README.md, LICENSE, THIRD_PARTY_NOTICES.md dist/MiKVM-lite/
           Compress-Archive -Path dist/MiKVM-lite/* -DestinationPath dist/MiKVM-windows-x64-lite.zip -Force
 
