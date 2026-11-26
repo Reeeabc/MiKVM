@@ -88,8 +88,9 @@ pub struct AppConfig {
     pub path: PathBuf,
     pub tv_address: String,
     pub auto_takeover_on_tv: bool,
-    pub wheel_as_dpad: bool,
     pub edge_switch: bool,
+    pub edge_resistance_pc: i32,
+    pub edge_resistance_tv: i32,
     pub clipboard_sync: bool,
     pub auto_internal_on_tv: bool,
     pub tv_monitor_hint: String,
@@ -106,8 +107,9 @@ impl AppConfig {
             path,
             tv_address: "192.168.1.200:5555".to_string(),
             auto_takeover_on_tv: true,
-            wheel_as_dpad: true,
             edge_switch: true,
+            edge_resistance_pc: 120,
+            edge_resistance_tv: 180,
             clipboard_sync: true,
             auto_internal_on_tv: false,
             tv_monitor_hint: "Mi Monitor".to_string(),
@@ -137,12 +139,18 @@ impl AppConfig {
                             cfg.auto_takeover_on_tv = b;
                         }
                     } else if k.eq_ignore_ascii_case("WheelAsDpad") {
-                        if let Ok(b) = v.to_ascii_lowercase().parse::<bool>() {
-                            cfg.wheel_as_dpad = b;
-                        }
+                        // Legacy key kept for backward compatibility; wheel always maps to DPAD up/down
                     } else if k.eq_ignore_ascii_case("EdgeSwitch") {
                         if let Ok(b) = v.to_ascii_lowercase().parse::<bool>() {
                             cfg.edge_switch = b;
+                        }
+                    } else if k.eq_ignore_ascii_case("EdgeResistancePc") {
+                        if let Ok(n) = v.parse::<i32>() {
+                            cfg.edge_resistance_pc = n.clamp(0, 300);
+                        }
+                    } else if k.eq_ignore_ascii_case("EdgeResistanceTv") {
+                        if let Ok(n) = v.parse::<i32>() {
+                            cfg.edge_resistance_tv = n.clamp(0, 300);
                         }
                     } else if k.eq_ignore_ascii_case("ClipboardSync") {
                         if let Ok(b) = v.to_ascii_lowercase().parse::<bool>() {
@@ -192,8 +200,9 @@ impl AppConfig {
             "# MiKVM 配置文件 (Redmi G Pro 27U / MiTV 软件 KVM 与切源工具)\r\n\
              TvAddress={}\r\n\
              AutoTakeoverOnTv={}\r\n\
-             WheelAsDpad={}\r\n\
              EdgeSwitch={}\r\n\
+             EdgeResistancePc={}\r\n\
+             EdgeResistanceTv={}\r\n\
              ClipboardSync={}\r\n\
              AutoInternalOnTv={}\r\n\
              TvMonitorHint={}\r\n\
@@ -204,8 +213,9 @@ impl AppConfig {
              # 自定义遥控快捷键（留空表示禁用）\r\n",
             self.tv_address,
             if self.auto_takeover_on_tv { "True" } else { "False" },
-            if self.wheel_as_dpad { "True" } else { "False" },
             if self.edge_switch { "True" } else { "False" },
+            self.edge_resistance_pc.clamp(0, 300),
+            self.edge_resistance_tv.clamp(0, 300),
             if self.clipboard_sync { "True" } else { "False" },
             if self.auto_internal_on_tv { "True" } else { "False" },
             self.tv_monitor_hint,

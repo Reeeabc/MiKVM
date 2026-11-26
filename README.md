@@ -1,12 +1,12 @@
 # MiKVM
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform: Windows 10/11](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D6.svg)](#环境要求)
-[![Rust](https://img.shields.io/badge/Built%20with-Rust%20%2B%20Win32-orange.svg)](#从源码构建)
+[![Platform: Windows 10/11](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D6.svg)](#环境要求与兼容性)
+[![Rust](https://img.shields.io/badge/Built%20with-Rust%20%2B%20Win32-orange.svg)](#从源码构建与开发者文档)
 
-一款专为 **Redmi 显示器 G Pro 27U（MiTV-MFFU1 / beekeeper）** 及小米澎湃OS智能显示器打造的极轻量 **Windows 11 托盘切换器与软件 KVM**。
+一款专为 **Redmi 显示器 G Pro 27U（MiTV-MFFU1 / beekeeper）** 及小米澎湃OS智能显示器打造的极轻量 **Windows 11 托盘切换器与多屏跨系统软件 KVM**。
 
-无需遥控器、无需硬件 USB 切换器、不挑电脑键鼠——在电脑右下角即可一键切换 **电视系统 / 电脑 DP / HDMI 1 / HDMI 2**、**6–10 ms 毫秒级调节真实硬件背光与音量**，并在切入电视系统时**自动隐形接管电脑的任意鼠标和键盘**；切回电脑时瞬间释放并自动还原你的中文输入法。
+无需遥控器、无需硬件 USB 切换器、不挑电脑键鼠——在电脑右下角即可一键切换 **电视系统 / 电脑 DP / HDMI 1 / HDMI 2**、**6–10 ms 毫秒级调节真实硬件背光与音量**，并通过纯 Rust **直连 `scrcpy-server` 控制通道**实现多屏无缝跨系统 KVM：显示器在看电视时，笔记本仍可自由办公，**鼠标滑过屏幕边缘或按快捷键即可在 Windows 与 Android TV 之间无缝穿梭**，支持双向等高滑边、可调防误触推力、按需剪贴板同步，且对电脑端中文输入法零打扰。
 
 ## 界面预览
 
@@ -17,8 +17,8 @@
       <sub><b>Win11 原生圆角托盘浮窗</b></sub>
     </td>
     <td align="center" width="33%">
-      <img src="docs/screenshots/settings.png" alt="ADB 与键鼠设置" /><br />
-      <sub><b>ADB 连接与键鼠接管设置</b></sub>
+      <img src="docs/screenshots/settings.png" alt="ADB 与多屏键鼠设置" /><br />
+      <sub><b>ADB 与多屏键鼠设置</b></sub>
     </td>
     <td align="center" width="33%">
       <img src="docs/screenshots/keymap.jpg" alt="自定义遥控快捷键" /><br />
@@ -31,22 +31,26 @@
 
 ## 核心特性
 
-- **极简 Windows 11 原生圆角浮窗**
+- **极简 Windows 11 原生圆角浮窗（自动跟随浅色 / 深色主题）**
   - 纯 Rust + Win32 / GDI+ 打造（仅单一依赖 `windows-sys`），**零运行库依赖**（不依赖 `.NET` / VC++ / WebView2 / Electron）。
-  - 单文件仅 **~430 KB**，常驻内存仅 **~2.6–5.4 MB**，待机 CPU **0%**。
-  - 左键托盘图标弹出圆角控制面板，打开自动静默刷新，点外部自动收起；未连接（红点）时直接点击顶部状态行即可一键重连。
-- **零硬件共享电脑键鼠（支持任意有线 / 2.4G / 蓝牙键鼠与任意配列）**
-  - 基于 `scrcpy` 无画面模式（`--no-video --no-audio --keyboard=sdk --raw-key-events --mouse=uhid`），几乎零带宽与 CPU 占用。
-  - 捕获窗口完全隐形且不进任务栏；在电视界面按快捷回切键或直接点击桌面 DP 图标切回电脑时，自动释放键鼠并更新面板状态。
-  - 可在「ADB 设置...」中自由开关「切到电视时自动接管键鼠」。
+  - 单文件仅 **~500 KB**，待机 CPU **0%**，自动同步 Windows 11 浅色/深色系统主题与任务栏托盘图标配色；多屏场景下浮窗与设置框始终弹出在可见电脑屏，永不迷失在幽灵电视屏。
+  - 左键托盘图标弹出控制面板，实时区分「控制电视中 / 电视待命 (焦点在电脑) / 已连接」状态；未连接（红点）时直接点击顶部状态行即可一键重连。
+- **直连 `scrcpy-server` 多屏无缝跨系统 KVM（零硬件、零输入法闪烁）**
+  - 原生 Rust 直连电视端 `scrcpy-server` 控制通道（`video=false audio=false`），**彻底免除 `scrcpy.exe` / SDL3 / FFmpeg 额外进程与内存占用**，不抢占 Windows 焦点，电脑中文输入法（小狼毫 / 微软拼音）零切换、零闪烁；同时自动抑制控制电视期间的 5 连 Shift 粘滞键弹窗。
+  - **双向无缝滑边 + 单帧高度对齐（免 Root）**：内置极轻 `MiTVEdge.jar`（6.8 KB，开源源码见 [assets/MiTVEdge.java](assets/MiTVEdge.java)），鼠标在笔记本与电视之间双向平滑穿梭，切入电视采用预激发单帧突发算法，光标在首帧以 `±1px` 精度直达对应高度、无可见跳变；支持独立微调 `电脑 → 电视` 与 `电视 → 电脑` 撞边推力（`0~300`，带停顿衰减防误触），且全屏游戏/拖拽窗口时自动暂停跨边。
+  - **一键切焦点 & 单屏智能锁定**：多屏待命时随时可按 `Ctrl + Alt + S`（可自定义）在电脑与电视间自由切换焦点并各自记忆光标位置；控制电视期间自动隐藏电脑光标。若笔记本合盖或处于「仅第二屏幕」，自动锁死为单屏独占电视，开盖即时恢复多屏。
+  - **可选临时「仅电脑屏幕」防幽灵屏**：默认保持 Windows 扩展模式零闪屏；也支持在设置中勾选「切电视时自动临时切为仅电脑屏幕（回 DP 还原）」。
+  - **PC ↔ TV 按需剪贴板同步**：自动同步普通文本剪贴板，并自动过滤密码管理器标记的隐私/敏感剪贴板格式。
 - **毫秒级硬件背光 & 音量直调（按需常驻，待机 0 额外内存）**
-  - 内置轻量 `MiTVDaemon.jar`（3 KB，开源源码见 [assets/MiTVDaemon.java](assets/MiTVDaemon.java)）：打开浮窗或进入电视接管时自动预热，拖动滑块单次写入延迟仅 **~6–10 ms**，松手后自动同步系统 PQ / 设置记账；收起面板空闲 25 秒自动退出，待机零残留。
+  - 内置轻量 `MiTVDaemon.jar`（3 KB，开源源码见 [assets/MiTVDaemon.java](assets/MiTVDaemon.java)）：打开浮窗或进入电视会话时自动预热，拖动滑块单次写入延迟仅 **~6–10 ms**，松手后自动同步系统 PQ / 设置记账；空闲 25 秒自动退出，待机零残留。
   - 兼容免 Root 音量调节回退（`cmd media_session`）。
 - **可视化自定义遥控快捷键 + 原生小爱远场语音**
-  - 在「ADB 设置... → 自定义快捷键...」中支持 **点击录制按键**、冲突检测、防误录普通打字/方向键保护，以及一键切换 **预设 1 / 预设 2**。
-  - 所有快捷键**仅在接管电视期间生效**，切回电脑 DP 自动卸载低级钩子，绝不影响游戏与日常办公。
+  - 在「ADB 设置... → 自定义快捷键...」中支持 **点击录制按键**、冲突检测、防误录保护，以及一键切换 **预设 1 / 预设 2**。
+  - 所有遥控键仅在控制电视时生效（`切焦点` 与 `切回电脑 DP` 在多屏待命时亦全局可用），切回 DP 自动卸载全部钩子，绝不影响游戏与日常办公。
   - 默认键位（均支持自由修改或清空）：
-    - `↑ / ↓ / ← / →` / `Enter`：方向键与确认
+    - `Ctrl + Alt + S`：多屏模式下在电脑与电视间一键切换键鼠焦点（保持电视画面）
+    - `Ctrl + Alt + D`：任意界面一键释控并切回电脑 DP
+    - `↑ / ↓ / ← / →` / `Enter` / 鼠标滚轮：方向键与确认（滚轮默认映射为电视上下/左右方向键）
     - `Esc` / 鼠标后退侧键：返回（`KEYCODE_BACK`）
     - `Home` / 鼠标中键或前进侧键：主页（`KEYCODE_HOME`）
     - `F12`：小米遥控器菜单键 `≡`（`KEYCODE_MENU`）
@@ -54,11 +58,6 @@
     - `PgUp` / `PgDn`：电视音量 `+` / `-`（支持长按连发）
     - `Ctrl + Alt + ↑ / ↓`：显示器硬件亮度 `+` / `-`（步进 5%，支持长按连发）
     - `Ctrl + Alt + M`：静音；`Ctrl + Alt + P`：电源息屏待机
-    - `Ctrl + Alt + D`：电视任意界面一键释放键鼠并切回电脑 DP
-    - 鼠标滚轮上 / 下：可选映射为电视上下方向键（默认开启，可在设置中开关）
-- **Windows 11 TSF 输入法精确保存与还原**
-  - 接管电视期间自动将 Windows 切换为 `ENG`，避免与电视端中文输入法抢占 `Shift` 与字母键；
-  - 切回电脑 DP 时通过 Windows TSF COM 接口（`ITfInputProcessorProfileMgr`）精确还原切换前的中文输入法（微软拼音 / 小狼毫等）。
 
 ---
 
@@ -71,23 +70,24 @@
 | 功能 | 免 Root | 已 Root |
 | :--- | :---: | :---: |
 | 信号源切换（电视 / DP / HDMI 1 / HDMI 2） | ✅ | ✅ |
-| 无线键鼠自动接管 + 滚轮方向键 + 自定义快捷键 | ✅ | ✅ |
+| 直连 `scrcpy-server` 无线键鼠控制 + 自定义快捷键 | ✅ | ✅ |
+| 多屏双向滑边跨屏（`MiTVEdge.jar`）+ 单帧高度对齐 | ✅ | ✅ |
+| 电脑 ↔ 电视剪贴板按需同步（自动隐私过滤） | ✅ | ✅ |
 | 小爱机身远场语音助手（`F11`） | ✅ | ✅ |
-| Windows 11 TSF 输入法自动保存与恢复 | ✅ | ✅ |
 | 电视音量调节（`PgUp/PgDn` 及面板音量滑块） | ✅ | ✅（6–10 ms 桥接） |
 | 真实硬件背光直写（面板背光滑块 + `Ctrl+Alt+↑/↓`） | — | ✅（6–10 ms 桥接） |
 
 ### 2. 电脑端
 - **Windows 10 / 11**（纯原生 Win32 可执行文件，零运行库；对电脑键鼠类型、连接方式与配列无任何限制）。
-- Releases 提供 **完整开箱版（`full.zip`，已内置官方 `scrcpy` 与 `adb`）** 和 **精简版（`lite.zip`，适合已装过 `scrcpy` 的用户，支持自动识别同级 `scrcpy/` 目录或系统环境变量 `PATH`）**。
+- Releases 提供 **完整开箱版（`full.zip`，已内置官方 `adb` 与 `scrcpy-server`）** 和 **精简版（`lite.zip`，适合已装过 `scrcpy` 的用户，支持自动识别同级 `scrcpy/` 目录或系统环境变量 `PATH`）**。
 
 ---
 
 ## 快速使用
 
 1. **新手推荐（开箱即用）**：从 [Releases](https://github.com/Reeeabc/MiKVM/releases) 下载 **`MiKVM-windows-x64-full.zip`**，解压到任意文件夹。
-   > 若下载精简版 `MiKVM-windows-x64-lite.zip` 或从源码编译，可将 [scrcpy Windows 64-bit](https://github.com/Genymobile/scrcpy/releases/latest) 解压到同级 `scrcpy/` 目录（或确保 `scrcpy.exe` / `adb.exe` 已在系统 `PATH` 中）。
-2. 双击运行 **`MiKVM.exe`**，左键点击右下角托盘图标打开浮窗 → 点击 **「ADB 设置...」** → 填入显示器无线 ADB 地址（如 `192.168.1.200:5555`）并保存即可使用。
+   > 若下载精简版 `MiKVM-windows-x64-lite.zip` 或从源码编译，可将 [scrcpy Windows 64-bit](https://github.com/Genymobile/scrcpy/releases/latest) 解压到同级 `scrcpy/` 目录（需包含 `adb.exe` 与 `scrcpy-server`，或确保两者已在系统 `PATH` 中）。
+2. 双击运行 **`MiKVM.exe`**，左键点击右下角托盘图标打开浮窗 → 点击 **「ADB 设置...」** → 填入显示器无线 ADB 地址（如 `192.168.1.200:5555`），按需微调双向撞边推力（`0~300`）并保存即可使用。
 
 ---
 
@@ -125,14 +125,14 @@ cargo build --release
 copy target\release\MiKVM.exe .\MiKVM.exe
 ```
 
-- 详细架构设计、`MiTVDaemon` 协议与二次开发指南见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)（AI 协作维护规范见 [AGENTS.md](AGENTS.md)）。
+- 详细架构设计、`MiTVDaemon` / `MiTVEdge` 协议与二次开发指南见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)（AI 协作维护规范见 [AGENTS.md](AGENTS.md)）。
 - 如需早期无外部依赖的 C# (.NET Framework 4) 原型版本源码，请切换至历史标签 `v1.0-csharp`。
 
 ---
 
 ## macOS 支持计划
 
-目前正式发布版为经过真机充分验证的 **Windows 10 / 11 原生版**。项目已在 `Cargo.toml` 中隔离 Windows 依赖，欢迎拥有 macOS 与 Redmi G Pro 27U 的开发者通过 PR 贡献 macOS 适配层（`NSStatusBar`/`NSPopover`、`CGEventTap`、`TIS` 输入法切换与 `scrcpy` 聚焦）。急用的 macOS 用户现阶段也可参考同生态的 [redmi-g-pro-27u-monitorswitch](https://github.com/HanHan666666/redmi-g-pro-27u-monitorswitch)。
+目前正式发布版为经过真机充分验证的 **Windows 10 / 11 原生版**。项目已在 `Cargo.toml` 中隔离 Windows 依赖，且核心控制通道 `src/scrcpy_proto.rs` 与 `adb.rs` / `config.rs` / `keymap.rs` 完全跨平台，欢迎拥有 macOS 与 Redmi G Pro 27U 的开发者通过 PR 贡献 macOS 适配层。急用的 macOS 用户现阶段也可参考同生态的 [redmi-g-pro-27u-monitorswitch](https://github.com/HanHan666666/redmi-g-pro-27u-monitorswitch)。
 
 ---
 
@@ -141,5 +141,5 @@ copy target\release\MiKVM.exe .\MiKVM.exe
 - 本项目采用 [MIT License](LICENSE) 开源。
 - 信号源指令、面板交互灵感及 `VolDirectTool.jar` 来自 [HanHan666666/redmi-g-pro-27u-monitorswitch](https://github.com/HanHan666666/redmi-g-pro-27u-monitorswitch)（MIT）。
 - `MtkDirectTool.jar` 及 MTK 背光寄存器读写方案来自 [YiHoooong/Mimonitor_Toolbox](https://github.com/YiHoooong/Mimonitor_Toolbox)（MIT）。
-- 无画面键鼠转发引擎基于 [Genymobile/scrcpy](https://github.com/Genymobile/scrcpy)（Apache-2.0）。
+- 电视端直连控制服务基于 [Genymobile/scrcpy](https://github.com/Genymobile/scrcpy)（Apache-2.0）。
 - 详细第三方声明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

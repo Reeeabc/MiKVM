@@ -259,9 +259,12 @@ impl DeviceController {
         let local_daemon_len = std::fs::metadata(self.assets_dir.join("MiTVDaemon.jar"))
             .map(|m| m.len())
             .unwrap_or(0);
+        let local_edge_len = std::fs::metadata(self.assets_dir.join("MiTVEdge.jar"))
+            .map(|m| m.len())
+            .unwrap_or(0);
         let check_cmd = format!(
-            "test -f /data/local/tmp/MiTVDaemon.jar && test -f /data/local/tmp/MtkDirectTool.jar && test -f /data/local/tmp/VolDirectTool.jar && [ \"$(wc -c < /data/local/tmp/MiTVDaemon.jar)\" -eq {} ] && echo OK",
-            local_daemon_len
+            "test -f /data/local/tmp/MiTVDaemon.jar && test -f /data/local/tmp/MtkDirectTool.jar && test -f /data/local/tmp/VolDirectTool.jar && test -f /data/local/tmp/MiTVEdge.jar && [ \"$(wc -c < /data/local/tmp/MiTVDaemon.jar)\" -eq {} ] && [ \"$(wc -c < /data/local/tmp/MiTVEdge.jar)\" -eq {} ] && echo OK",
+            local_daemon_len, local_edge_len
         );
         let (_, out, _) = self.shell(&check_cmd, 2500);
         if out.trim() == "OK" {
@@ -271,7 +274,12 @@ impl DeviceController {
             return;
         }
         let addr = self.tv_address();
-        for name in ["MiTVDaemon.jar", "MtkDirectTool.jar", "VolDirectTool.jar"] {
+        for name in [
+            "MiTVDaemon.jar",
+            "MtkDirectTool.jar",
+            "VolDirectTool.jar",
+            "MiTVEdge.jar",
+        ] {
             let p = self.assets_dir.join(name);
             if p.exists() {
                 if let Some(s) = p.to_str() {
@@ -281,7 +289,7 @@ impl DeviceController {
             }
         }
         let _ = self.shell(
-            "chmod 644 /data/local/tmp/MiTVDaemon.jar /data/local/tmp/MtkDirectTool.jar /data/local/tmp/VolDirectTool.jar 2>/dev/null",
+            "chmod 644 /data/local/tmp/MiTVDaemon.jar /data/local/tmp/MtkDirectTool.jar /data/local/tmp/VolDirectTool.jar /data/local/tmp/MiTVEdge.jar 2>/dev/null",
             2500,
         );
         if let Ok(mut g) = self.jars_verified.lock() {

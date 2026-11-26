@@ -22,14 +22,12 @@ const ID_EDIT_ADDR: i32 = 201;
 const ID_BTN_TEST: i32 = 202;
 const ID_LBL_STATUS: i32 = 203;
 const ID_CHK_TAKEOVER: i32 = 204;
-const ID_CHK_WHEEL: i32 = 205;
 const ID_CHK_AUTOSTART: i32 = 206;
 const ID_BTN_SAVE: i32 = 207;
 const ID_BTN_CANCEL: i32 = 208;
 const ID_BTN_KEYMAP: i32 = 209;
 const ID_LBL_GUIDE: i32 = 210;
 const ID_LBL_CHK_TAKEOVER: i32 = 214;
-const ID_LBL_CHK_WHEEL: i32 = 215;
 const ID_LBL_CHK_AUTOSTART: i32 = 216;
 const ID_CHK_EDGE: i32 = 220;
 const ID_CHK_CLIP: i32 = 221;
@@ -37,6 +35,8 @@ const ID_CHK_AUTO_INT: i32 = 222;
 const ID_LBL_CHK_EDGE: i32 = 230;
 const ID_LBL_CHK_CLIP: i32 = 231;
 const ID_LBL_CHK_AUTO_INT: i32 = 232;
+const ID_EDIT_RES_PC: i32 = 240;
+const ID_EDIT_RES_TV: i32 = 241;
 const WM_TEST_DONE: u32 = WM_APP + 50;
 
 const BM_GETCHECK: u32 = 0x00F0;
@@ -104,7 +104,7 @@ where
         let sc = |v: f32| (v * s).round() as i32;
 
         let cw = sc(468.0);
-        let ch = sc(486.0);
+        let ch = sc(512.0);
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
         let mut wr = RECT { left: 0, top: 0, right: cw, bottom: ch };
         AdjustWindowRectEx(&mut wr, style, 0, 0);
@@ -148,14 +148,15 @@ where
 
         let pad = sc(20.0);
         let inner = cw - pad * 2;
-        let (addr, auto_to, wheel_dp, edge_sw, clip_sync, auto_int, guide) = cfg
+        let (addr, auto_to, edge_sw, res_pc, res_tv, clip_sync, auto_int, guide) = cfg
             .lock()
             .map(|c| {
                 (
                     c.tv_address.clone(),
                     c.auto_takeover_on_tv,
-                    c.wheel_as_dpad,
                     c.edge_switch,
+                    c.edge_resistance_pc,
+                    c.edge_resistance_tv,
                     c.clipboard_sync,
                     c.auto_internal_on_tv,
                     c.keymap.summary_text(),
@@ -166,7 +167,8 @@ where
                     "192.168.1.200:5555".to_string(),
                     true,
                     true,
-                    true,
+                    120,
+                    180,
                     true,
                     false,
                     crate::keymap::KeyMap::default().summary_text(),
@@ -208,20 +210,26 @@ where
         make_ctrl("STATIC", "", 0, 0, pad, sc(74.0), inner, sc(18.0), ID_LBL_STATUS);
 
         let chk_to = make_checkbox("切换到「电视系统」时自动开启直连键鼠控制", sc(96.0), ID_CHK_TAKEOVER, ID_LBL_CHK_TAKEOVER);
-        let chk_edge = make_checkbox("多屏时鼠标滑过边界自动切入电视（防误触阻尼）", sc(124.0), ID_CHK_EDGE, ID_LBL_CHK_EDGE);
+        let chk_edge = make_checkbox("多屏时鼠标滑过边界双向无缝跨屏（防误触阻尼）", sc(124.0), ID_CHK_EDGE, ID_LBL_CHK_EDGE);
         let chk_clip = make_checkbox("电脑 ↔ 电视剪贴板按需同步（自动过滤密码隐私）", sc(152.0), ID_CHK_CLIP, ID_LBL_CHK_CLIP);
-        let chk_wh = make_checkbox("控制电视期间鼠标滚轮映射为上下方向键", sc(180.0), ID_CHK_WHEEL, ID_LBL_CHK_WHEEL);
-        let chk_int = make_checkbox("切电视时自动临时切为「仅电脑屏幕」（回 DP 还原）", sc(208.0), ID_CHK_AUTO_INT, ID_LBL_CHK_AUTO_INT);
-        let chk_as = make_checkbox("Windows 开机自动启动", sc(236.0), ID_CHK_AUTOSTART, ID_LBL_CHK_AUTOSTART);
+        let chk_int = make_checkbox("切电视时自动临时切为「仅电脑屏幕」（回 DP 还原）", sc(180.0), ID_CHK_AUTO_INT, ID_LBL_CHK_AUTO_INT);
+        let chk_as = make_checkbox("Windows 开机自动启动", sc(208.0), ID_CHK_AUTOSTART, ID_LBL_CHK_AUTOSTART);
+
+        // Edge resistance section placed cleanly below all checkboxes with ample spacing
+        make_ctrl("STATIC", "撞边推力（0~300，越大越防误触，0 为一碰即过）：", 0, 0, pad, sc(240.0), inner, sc(20.0), 0);
+        let res_y = sc(264.0);
+        make_ctrl("STATIC", "电脑 → 电视：", 0, 0, pad, res_y + sc(3.0), sc(98.0), sc(22.0), 0);
+        make_ctrl("EDIT", &res_pc.to_string(), WS_EX_CLIENTEDGE, ES_AUTOHSCROLL | WS_TABSTOP, pad + sc(100.0), res_y, sc(68.0), sc(25.0), ID_EDIT_RES_PC);
+        make_ctrl("STATIC", "电视 → 电脑：", 0, 0, pad + sc(196.0), res_y + sc(3.0), sc(98.0), sc(22.0), 0);
+        make_ctrl("EDIT", &res_tv.to_string(), WS_EX_CLIENTEDGE, ES_AUTOHSCROLL | WS_TABSTOP, pad + sc(296.0), res_y, sc(68.0), sc(25.0), ID_EDIT_RES_TV);
 
         SendMessageW(chk_to, BM_SETCHECK, if auto_to { BST_CHECKED } else { BST_UNCHECKED } as WPARAM, 0);
         SendMessageW(chk_edge, BM_SETCHECK, if edge_sw { BST_CHECKED } else { BST_UNCHECKED } as WPARAM, 0);
         SendMessageW(chk_clip, BM_SETCHECK, if clip_sync { BST_CHECKED } else { BST_UNCHECKED } as WPARAM, 0);
-        SendMessageW(chk_wh, BM_SETCHECK, if wheel_dp { BST_CHECKED } else { BST_UNCHECKED } as WPARAM, 0);
         SendMessageW(chk_int, BM_SETCHECK, if auto_int { BST_CHECKED } else { BST_UNCHECKED } as WPARAM, 0);
         SendMessageW(chk_as, BM_SETCHECK, if is_autostart_enabled() { BST_CHECKED } else { BST_UNCHECKED } as WPARAM, 0);
 
-        make_ctrl("STATIC", &guide, 0, WS_BORDER, pad, sc(272.0), inner, sc(150.0), ID_LBL_GUIDE);
+        make_ctrl("STATIC", &guide, 0, WS_BORDER, pad, sc(302.0), inner, sc(146.0), ID_LBL_GUIDE);
 
         make_ctrl("BUTTON", "自定义快捷键...", 0, WS_TABSTOP, pad, ch - sc(46.0), sc(126.0), sc(32.0), ID_BTN_KEYMAP);
         make_ctrl("BUTTON", "保存", 0, BS_DEFPUSHBUTTON | WS_TABSTOP, cw - pad - sc(168.0), ch - sc(46.0), sc(78.0), sc(32.0), ID_BTN_SAVE);
@@ -303,7 +311,6 @@ unsafe extern "system" fn settings_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp
             let id = (wp & 0xFFFF) as i32;
             match id {
                 ID_LBL_CHK_TAKEOVER
-                | ID_LBL_CHK_WHEEL
                 | ID_LBL_CHK_AUTOSTART
                 | ID_LBL_CHK_EDGE
                 | ID_LBL_CHK_CLIP
@@ -372,8 +379,9 @@ unsafe extern "system" fn settings_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp
                     let addr = AppConfig::normalize_address(&raw);
                     let auto_to = SendMessageW(GetDlgItem(hwnd, ID_CHK_TAKEOVER), BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
                     let edge_sw = SendMessageW(GetDlgItem(hwnd, ID_CHK_EDGE), BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
+                    let res_pc = get_edit_text(hwnd, ID_EDIT_RES_PC).trim().parse::<i32>().ok().map(|v| v.clamp(0, 300));
+                    let res_tv = get_edit_text(hwnd, ID_EDIT_RES_TV).trim().parse::<i32>().ok().map(|v| v.clamp(0, 300));
                     let clip_sync = SendMessageW(GetDlgItem(hwnd, ID_CHK_CLIP), BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
-                    let wheel_dp = SendMessageW(GetDlgItem(hwnd, ID_CHK_WHEEL), BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
                     let auto_int = SendMessageW(GetDlgItem(hwnd, ID_CHK_AUTO_INT), BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
                     let auto_start = SendMessageW(GetDlgItem(hwnd, ID_CHK_AUTOSTART), BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
 
@@ -387,8 +395,13 @@ unsafe extern "system" fn settings_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp
                                 }
                                 cfg.auto_takeover_on_tv = auto_to;
                                 cfg.edge_switch = edge_sw;
+                                if let Some(v) = res_pc {
+                                    cfg.edge_resistance_pc = v;
+                                }
+                                if let Some(v) = res_tv {
+                                    cfg.edge_resistance_tv = v;
+                                }
                                 cfg.clipboard_sync = clip_sync;
-                                cfg.wheel_as_dpad = wheel_dp;
                                 cfg.auto_internal_on_tv = auto_int;
                                 cfg.save();
                             }

@@ -537,7 +537,7 @@ unsafe extern "system" fn host_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
             let to_opt = with_host(|h| Arc::clone(&h.takeover));
             if let Some(to) = to_opt {
                 if let Ok(mut g) = to.lock() {
-                    g.on_edge_enter_tv_ui();
+                    g.on_edge_enter_tv_ui(wp);
                 }
             }
             update_tray_visual();

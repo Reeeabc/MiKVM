@@ -1,24 +1,27 @@
 # MiKVM 架构与维护文档
 
-本文档面向 **MiKVM** 的维护者与开源贡献者，介绍整体模块设计、核心数据流、`MiTVDaemon` 通信协议以及未来 macOS 移植的接入点。
+本文档面向 **MiKVM** 的维护者与开源贡献者，介绍整体模块设计、直连 `scrcpy-server` 跨系统多屏 KVM 状态机、`MiTVDaemon` / `MiTVEdge` 通信协议，以及未来 macOS 移植的接入点。
 
 ---
 
 ## 1. 模块总览
 
-MiKVM 刻意保持**零重型框架**架构（无 Electron / Tauri / WebView2 / `.NET`），仅依赖 `windows-sys` 一个 Rust crate 直接调用系统原生 API：
+MiKVM 刻意保持**零重型框架**架构（无 Electron / Tauri / WebView2 / `.NET`，也无需启动 `scrcpy.exe` / SDL3 / FFmpeg），仅依赖 `windows-sys` 一个 Rust crate 直接调用系统原生 API：
 
 | 模块 | 职责 | 平台相关性 |
 | :--- | :--- | :---: |
-| `src/config.rs` | `config.ini` 读写（兼容 UTF-8 BOM）、`assets/` 与 `scrcpy/`（含系统 `PATH`）路径解析、开机自启注册表 | 主体跨平台（仅自启为 Win32） |
-| `src/adb.rs` | ADB 命令执行、设备状态合并查询、常驻按键 shell 管道、`MiTVDaemon` 单队列合并与按需保活工作线程 | **跨平台**（仅隐藏窗口 flag 为 Win32） |
-| `src/keymap.rs` | 11 个可映射动作模型、`KeyChord` 解析与格式化、预设 1/2、冲突与防误录校验 | **跨平台**（键码表抽象即可移植） |
-| `src/takeover.rs` | `scrcpy` 隐形捕获窗口生命周期、表驱动 `WH_KEYBOARD_LL`、滚轮 `WH_MOUSE_LL`、DP 快速回切监听 | 平台层（Windows） |
-| `src/ime.rs` | 动态加载 `msctf.dll`，通过 Win11 TSF COM（`ITfInputProcessorProfileMgr`）保存并还原中文输入法 | 平台层（Windows） |
-| `src/gdi.rs` / `src/flyout.rs` | 双缓冲 GDI+ Win11 圆角浮窗、矢量图标绘制、35ms 实时节流滑块、红点点击重连 | 平台层（Windows） |
-| `src/settings_ui.rs` / `src/keymap_ui.rs` | 原生 Win32 ComCtl32 v6 设置窗口与临时低级钩子按键录制窗口 | 平台层（Windows） |
-| `src/main.rs` | 单实例互斥锁、系统托盘消息循环与各子系统调度中枢 | 平台层（Windows） |
+| `src/config.rs` | `config.ini` 读写（兼容 UTF-8 BOM）、`assets/` 与 `scrcpy/`（含系统 `PATH`）路径解析、系统浅色/深色主题查询、开机自启注册表 | 主体跨平台（仅自启/主题为 Win32） |
+| `src/adb.rs` | ADB 命令执行、设备状态合并查询、自动校验并推送 `assets/*.jar`、常驻按键 shell 管道、`MiTVDaemon` 单队列合并与按需保活工作线程 | **跨平台**（仅隐藏窗口 flag 为 Win32） |
+| `src/scrcpy_proto.rs` | 纯 Rust 直连 `scrcpy-server` 控制通道（`adb forward` + TCP）、UHID 67 字节虚拟相对鼠标、VelocityControl 预激发单帧突发移动、Android 按键/组合键注入与双向剪贴板报文 | **100% 跨平台** |
+| `src/display.rs` | `QueryDisplayConfig` 多屏拓扑检测、小米/红米 EDID（`0xA961`）识别、笔记本合盖通知（`GUID_LIDSWITCH_STATE_CHANGE`）、多屏防幽灵弹窗定位、可选临时切「仅电脑屏幕」与还原 | 平台层（Windows） |
+| `src/clipboard.rs` | Win32 `CF_UNICODETEXT` 读写与密码管理器隐私剪贴板格式过滤（`ExcludeClipboardContentFromMonitorProcessing` / `CanIncludeInClipboardHistory`） | 平台层（Windows） |
+| `src/keymap.rs` | 12 个可映射动作模型（含 `ToggleFocus` 焦点切换）、`KeyChord` 解析与格式化、预设 1/2、冲突与防误录校验 | **跨平台**（键码表抽象即可移植） |
+| `src/takeover.rs` | 4 态多屏 KVM 状态机（`Idle` / `TvLocked` / `TvFocused` / `TvStandby`）、`WM_INPUT` 原始鼠标增量、`HELD_MODS` 独立修饰键隔离、5 连 Shift 粘滞键抑制、电脑端弹性阻力边界与电视端 `MiTVEdge` 联动、常驻 shell `DP Watcher` | 平台层（Windows） |
+| `src/gdi.rs` / `src/flyout.rs` | 双缓冲 GDI+ Win11 圆角浮窗（自动跟随系统浅色/深色主题与任务栏配色）、矢量图标绘制、35ms 实时节流滑块、红点点击重连 | 平台层（Windows） |
+| `src/settings_ui.rs` / `src/keymap_ui.rs` | 原生 Win32 ComCtl32 v6 多屏设置窗口（含深色标题栏与控件主题）与临时低级钩子按键录制窗口 | 平台层（Windows） |
+| `src/main.rs` | 单实例互斥锁、系统托盘消息循环（`WM_INPUT` / `WM_DISPLAYCHANGE` / `WM_POWERBROADCAST` / `WM_SETTINGCHANGE`）与各子系统调度中枢 | 平台层（Windows） |
 | `assets/MiTVDaemon.java` | 电视端 3 KB 极轻常驻桥接进程，消除 `app_process` ART 虚拟机反复冷启动开销 | Android / MT9655 电视端 |
+| `assets/MiTVEdge.java` | 电视端 6.8 KB 免 Root 3px 透明边沿悬浮传感器，实现电视 → 电脑双向滑边与精确 `y` 坐标回传 | Android TV（免 Root） |
 | `extras/Fcitx5TvFix/` | 可选 Xposed / Vector 模块，修复 Fcitx5 在 HyperOS TV 非输入框界面的焦点与方向键拦截 | Android TV（仅 Root + Fcitx5） |
 
 ---
@@ -28,7 +31,7 @@ MiKVM 刻意保持**零重型框架**架构（无 Electron / Tauri / WebView2 / 
 ### 2.1 毫秒级背光与音量直调（按需常驻 + 自动回收）
 
 ```text
-用户左键点开托盘浮窗（或切入电视接管）
+用户左键点开托盘浮窗（或切入电视控制）
    │
    ├─► DeviceController::set_keep_warm(true)
    │      └─ 后台工作线程拉起 1 条 adb shell -> su 1000 -> MiTVDaemon.jar
@@ -42,7 +45,7 @@ MiKVM 刻意保持**零重型框架**架构（无 Electron / Tauri / WebView2 / 
    ├─► 松开滑块（或亮度快捷键停止 450ms 后）
    │      └─ 补发一次 PIC_MODE_CHANGED 广播 + settings put global 同步系统记账
    │
-   └─► 收起浮窗且未处于电视接管状态
+   └─► 收起浮窗且未处于电视会话状态
           └─ DeviceController::set_keep_warm(false)
              └─ 空闲满 25 秒自动发送 "Q\n" -> MiTVDaemon 执行 System.exit(0) 退出（待机 0 额外内存）
 ```
@@ -59,31 +62,58 @@ MiKVM 刻意保持**零重型框架**架构（无 Electron / Tauri / WebView2 / 
 | `G` | `G <bl> <vol>` | 一次读取当前硬件背光与媒体音量（失败项为 `-1`） |
 | `Q` | *(进程立即退出)* | 调用 `System.exit(0)` 立即终止 Binder 线程与进程 |
 
-### 2.3 切入电视、键鼠接管与无感切回 DP
+### 2.3 直连 `scrcpy-server` 多屏软 KVM 与 4 态机
 
-1. **保存输入法**：切电视前在主线程调用 `save_current_ime()` 通过 Win11 TSF `ITfInputProcessorProfileMgr` 记录当前激活的中文输入法 Profile（如小狼毫 / 微软拼音）。
-2. **启动隐形 `scrcpy`**：以 `--no-video --no-audio --keyboard=sdk --raw-key-events --mouse=uhid --mouse-bind=+hbh:b+++ --window-borderless` 启动，捕获窗口设为 `WS_EX_LAYERED (alpha=1) | WS_EX_TOOLWINDOW` 使其完全隐形且不占任务栏，并将 Windows 切至 `ENG (0x0409)` 防止与电视端输入法抢 `Shift`。
-3. **安装临时钩子**：仅在接管期间安装表驱动 `WH_KEYBOARD_LL`（配合 256-bit 无锁吞键位图）与 `WH_MOUSE_LL`（滚轮 → 上下方向键，50ms 节流）；所有遥控按键与小爱远场语音（`ONBOARD_MIC_START`）通过常驻 `adb shell` stdin 管道注入（~15 ms）。
-4. **双路径自动释放**：
-   - 路径 A：按下自定义的 `ReturnDp` 快捷键（默认 `Ctrl+Alt+D`）→ 立刻停止接管并发送 DP 切源指令。
-   - 路径 B：在电视界面直接用鼠标/遥控器切回 DP → 后台 `DP Watcher`（500ms 稳定期 + 450/650ms 轮询）检测到 `ExternalSourceActivity` 后自动发 `WM_DP_RETURNED` 停止接管、乐观更新面板为 DP 并静默刷新。
-5. **还原输入法**：退出接管时立即卸载全部钩子，关闭 `scrcpy`，并调用 `restore_saved_ime()`（立即 + 200ms 重试一次）恢复切电视前的中文输入法。
+MiKVM 放弃了外挂 `scrcpy.exe` 隐形窗口方案，改由 Rust 原生客户端（`src/scrcpy_proto.rs`）通过 `adb forward` 直连电视端 `scrcpy-server` 控制通道（`video=false audio=false control=true`）：
+
+- **零焦点/输入法闪烁**：不再创建任何抢焦点的 Windows 捕获窗，电脑端中文输入法（小狼毫 / 微软拼音）完全不受打扰，也省去 `scrcpy.exe` + SDL3 + FFmpeg 约 30 MB 内存开销。
+- **4 态拓扑自适应**：
+  - `Idle`：显示器在电脑 DP/HDMI，未建立电视控制通道，全部钩子与原始输入已卸载。
+  - `TvLocked`：单屏模式（如笔记本合盖或「仅第二屏幕」），无可见电脑屏幕，键鼠严格锁定于电视端直至切回 DP 或开盖。
+  - `TvFocused`：多屏模式且当前键鼠焦点在电视；安装 `WH_KEYBOARD_LL` + `WH_MOUSE_LL` + `WM_INPUT` 原始鼠标增量（通过 `HELD_MODS` 独立追踪修饰键并临时禁用 5 连 Shift 粘滞键弹窗），同时将 Windows 光标隐身停泊至不可见区。
+  - `TvStandby`：多屏模式且焦点切回电脑（显示器画面仍保持在电视系统）；卸载鼠标钩子与原始输入，仅保留 `ReturnDp` 与 `ToggleFocus` 两个待命全局热键，并在电脑接缝边启用可调阻力的跨屏触发墙。
+- **PC ↔ TV 双向无缝跨屏与单帧高度对齐**：
+  - **PC → TV**：扩展屏下覆盖幽灵电视屏区域实现带 `260ms` 停顿衰减的弹性推力墙（`EdgeResistancePc`, `0~300`）；仅电脑屏下采用 2px 边缘驻留触发。切入电视瞬间，利用实测的 Android 14 `VelocityControl`（`3.000x`）特性发送 **预激发单帧突发（Primed Burst）**——同一 TCP 写入内先发 1 包 `(pin_dx, 0)` 预热加速曲线，紧接 `(0, sy)` 纵向位移包，首帧即以 **`±1px` 精度**直达对齐高度（消除可见跳跃），并配 `160ms` 闭环校验与在线自适应校准。
+  - **TV → PC**：免 Root 电视端 [MiTVEdge.java](file:///D:/develop/projects/mitv/MiKVM/assets/MiTVEdge.java) 监听 3px 透明边沿 `HOVER` 坐标，结合电脑端 `WM_INPUT` 外推位移累计超过 `EdgeResistanceTv`（`0~300`）即刻按对应 `y` 高度滑回电脑。
+- **对称位置记忆 & 按需剪贴板同步**：
+  - 按 `ToggleFocus`（默认 `Ctrl+Alt+S`）在 PC 与电视间切换时，双方各自保留上次离开时的光标位置；进入电视前通过 `SendInput` 干净释放电脑端按住的组合修饰键，防止切屏卡键。
+  - 每次切入电视按需将电脑新剪贴板推送至电视（跳过含密码管理器隐私标记的剪贴板），电视复制文本时通过 `DEV_TYPE_CLIPBOARD` 自动同步回电脑。
+- **常驻 shell `DP Watcher`**：单条长连 `adb shell` 循环检测 `ExternalSourceActivity`，免除高频拉起短命 `adb.exe` 进程，在电视界面切回 DP 时毫秒级自动释控并还原临时显示配置。
+
+### 2.4 `MiTVEdge` 文本协议（stdin / stdout）
+
+`MiTVEdge.jar` 通过 `CLASSPATH=/data/local/tmp/MiTVEdge.jar:/data/local/tmp/scrcpy-server.jar` 在 `com.android.shell`（`uid 2000` + `appops set com.android.shell SYSTEM_ALERT_WINDOW allow`）下免 Root 运行，复用 `scrcpy-server` 内的 `Workarounds.apply()` 与 `FakeContext.get()` 解决 Android 14 `app_process` 挂载 `TYPE_APPLICATION_OVERLAY` 的权限与 `ContentResolver` 限制：
+
+| 方向 | 报文 | 说明 |
+| :--- | :--- | :--- |
+| stdout | `READY <w> <h>` | 3px 透明悬浮边条已挂接，回报逻辑屏幕宽高（如 `1920 1080`） |
+| stdout | `H <0..10000>` | 指针悬停在边条上，附归一化位置万分比；`HOVER_ENTER` 或变化 `≥ 0.6%` 立即上报不丢尾帧 |
+| stdout | `L` | 指针离开边条 |
+| stdin | `S LEFT\|RIGHT\|TOP\|BOTTOM\|HIDE` | 动态调整边条位置或隐藏（相同方向幂等跳过，避免冗余重排） |
+| stdin | `Q` | 立即移除悬浮窗并 `System.exit(0)` 退出 |
 
 ---
 
 ## 3. 配置项参考（`config.ini`）
 
-位于可执行文件同级目录（首次运行自动生成，Git 忽略以防泄露个人 IP）：
+位于可执行文件同级目录（首次运行自动生成，Git 忽略以防泄露个人 IP；完整示例见 [config.example.ini](file:///D:/develop/projects/mitv/MiKVM/config.example.ini)）：
 
 ```ini
 TvAddress=192.168.1.200:5555
 AutoTakeoverOnTv=True
-WheelAsDpad=True
+EdgeSwitch=True
+EdgeResistancePc=120
+EdgeResistanceTv=180
+ClipboardSync=True
+AutoInternalOnTv=False
+TvMonitorHint=Mi Monitor
+TvEdgeSide=Left
 DpInput=29
 Hdmi1Input=23
 Hdmi2Input=24
 
 Key.ReturnDp=Ctrl+Alt+D
+Key.ToggleFocus=Ctrl+Alt+S
 Key.Back=Esc
 Key.Home=Home
 Key.Menu=F12
@@ -96,25 +126,25 @@ Key.BrightnessDown=Ctrl+Alt+Down
 Key.Power=Ctrl+Alt+P
 ```
 
-- 除 `Key.ReturnDp`（防止用户无快捷键退出接管）外，其余 `Key.*` 均可留空以禁用。
+- `EdgeResistancePc` / `EdgeResistanceTv` 范围 `0~300`（`0` 表示一碰即过，越大越防误触，带 `260ms` 停顿清零）。
+- 除 `Key.ReturnDp`（防止用户无快捷键退出控制）外，其余 `Key.*` 均可留空以禁用；鼠标滚轮默认永久映射为电视上下/左右方向键。
 - 非 G Pro 27U 机型可通过 `adb shell settings get global mitv.tvplayer.hdmi.last.source` 查出对应端口编号并修改 `DpInput / Hdmi1Input / Hdmi2Input`。
 
 ---
 
 ## 4. macOS 移植接入指南（欢迎 PR）
 
-`Cargo.toml` 已将 `windows-sys` 隔离在 `[target.'cfg(windows)'.dependencies]` 下。若希望贡献 macOS 版本，核心层（`adb.rs` / `config.rs` / `keymap.rs`）可直接复用，只需补齐 4 个 macOS 原生模块：
+`Cargo.toml` 已将 `windows-sys` 隔离在 `[target.'cfg(windows)'.dependencies]` 下。且直连控制协议层 `src/scrcpy_proto.rs` 与核心层 `adb.rs` / `config.rs` / `keymap.rs` 均不依赖重型桌面框架，移植 macOS 只需补齐 3 个原生适配模块：
 
 1. **状态栏与浮窗**：使用 `NSStatusBar` + `NSPopover`（SwiftUI 或 `objc2-app-kit`）。
-2. **全局键鼠拦截**：使用 `CGEventTapCreate`（提示用户在「隐私与安全性 → 辅助功能」中授权），仅在接管电视期间启用。
-3. **输入法保存与还原**：使用 Carbon `TISCopyCurrentKeyboardInputSource` / `TISSelectInputSource` 切换至 ABC 并在退出接管后还原。
-4. **`scrcpy` 隐形聚焦捕获**：处理 macOS 下 `scrcpy --no-video --mouse=uhid --keyboard=sdk` 窗口置前与指针捕获逻辑。
+2. **多屏拓扑与键鼠捕获**：使用 `CGGetActiveDisplayList` + `CGEventTapCreate`（辅助功能授权）捕获相对鼠标增量与热键，直接喂给跨平台的 `ScrcpyControlClient`（无需再切换输入法或维护隐形 `scrcpy` 窗口）。
+3. **剪贴板桥接**：使用 `NSPasteboard` 并过滤 `org.nspasteboard.ConcealedType` / `TransientType`。
 
 ---
 
 ## 5. 发布检查清单
 
-1. 本地 `cargo build --release` 保证 **0 error、0 warning**。
+1. 本地 `cargo build --release` 保证 **0 error、0 warning**，并通过 `objdump -p` 确认仅依赖 Windows 系统内置 DLL。
 2. 确认没有把个人 `config.ini`、`scrcpy/`、`*.exe`、`*.jks` 提交进仓库（`git status` 干净）。
-3. 更新版本号（`Cargo.toml`、`assets/app.manifest`），提交并推送 `main`。
+3. 更新版本号（`Cargo.toml`、`assets/app.manifest`），提交并推送目标分支。
 4. 打附注标签推送：`git tag -a vX.Y.Z -m "..." && git push origin vX.Y.Z`，GitHub Actions 将自动编译并发布 `MiKVM-windows-x64-full.zip`、`MiKVM-windows-x64-lite.zip` 与 `SHA256SUMS.txt`。

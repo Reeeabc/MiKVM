@@ -288,6 +288,77 @@ impl ScrcpyControlClient {
         }
     }
 
+    /// Sends an entire multi-packet relative mouse move in ONE single TCP write so Android
+    /// InputReader processes the whole displacement inside a single 16ms display frame!
+    pub fn send_mouse_burst(&self, mut dx: i32, mut dy: i32) {
+        if (dx == 0 && dy == 0) || !self.alive.load(Ordering::Relaxed) {
+            return;
+        }
+        let Ok(mut g) = self.conn.lock() else {
+            return;
+        };
+        let Some(ref mut c) = *g else {
+            return;
+        };
+        let steps = ((dx.abs().max(dy.abs()) + 126) / 127).max(1) as usize;
+        let mut buf = Vec::with_capacity(steps * 10);
+        while dx != 0 || dy != 0 {
+            let sx = dx.clamp(-127, 127) as i8;
+            let sy = dy.clamp(-127, 127) as i8;
+            dx -= sx as i32;
+            dy -= sy as i32;
+            buf.extend_from_slice(&build_uhid_mouse_packet(c.buttons, sx, sy, 0, 0));
+        }
+        if c.writer.write_all(&buf).is_err() {
+            self.alive.store(false, Ordering::Release);
+        }
+    }
+
+    /// Sends a velocity-primed single-frame burst in ONE TCP write:
+    /// Packet 1 = `(prime_dx, prime_dy)` pins the cursor to the edge AND primes Android's
+    /// VelocityControl (eliminating the 1x->3x non-linear cliff after >200ms idle!),
+    /// followed immediately by `(dx, dy)` packets that scale linearly at exact `acceleration` (3.0x),
+    /// achieving +/-1px accuracy across the entire TV screen in a single VSync frame!
+    pub fn send_primed_mouse_burst(
+        &self,
+        prime_dx: i32,
+        prime_dy: i32,
+        mut dx: i32,
+        mut dy: i32,
+    ) {
+        if !self.alive.load(Ordering::Relaxed) {
+            return;
+        }
+        let Ok(mut g) = self.conn.lock() else {
+            return;
+        };
+        let Some(ref mut c) = *g else {
+            return;
+        };
+        let p_steps = ((prime_dx.abs().max(prime_dy.abs()) + 126) / 127).max(1) as usize;
+        let m_steps = ((dx.abs().max(dy.abs()) + 126) / 127) as usize;
+        let mut buf = Vec::with_capacity((p_steps + m_steps) * 10);
+        let mut pdx = prime_dx;
+        let mut pdy = prime_dy;
+        while pdx != 0 || pdy != 0 {
+            let sx = pdx.clamp(-127, 127) as i8;
+            let sy = pdy.clamp(-127, 127) as i8;
+            pdx -= sx as i32;
+            pdy -= sy as i32;
+            buf.extend_from_slice(&build_uhid_mouse_packet(c.buttons, sx, sy, 0, 0));
+        }
+        while dx != 0 || dy != 0 {
+            let sx = dx.clamp(-127, 127) as i8;
+            let sy = dy.clamp(-127, 127) as i8;
+            dx -= sx as i32;
+            dy -= sy as i32;
+            buf.extend_from_slice(&build_uhid_mouse_packet(c.buttons, sx, sy, 0, 0));
+        }
+        if !buf.is_empty() && c.writer.write_all(&buf).is_err() {
+            self.alive.store(false, Ordering::Release);
+        }
+    }
+
     pub fn send_mouse_button(&self, mask: u8, down: bool) {
         if !self.alive.load(Ordering::Relaxed) {
             return;
@@ -300,20 +371,6 @@ impl ScrcpyControlClient {
                     c.buttons &= !mask;
                 }
                 let pkt = build_uhid_mouse_packet(c.buttons, 0, 0, 0, 0);
-                if c.writer.write_all(&pkt).is_err() {
-                    self.alive.store(false, Ordering::Release);
-                }
-            }
-        }
-    }
-
-    pub fn send_mouse_wheel(&self, vwheel: i8, hwheel: i8) {
-        if (vwheel == 0 && hwheel == 0) || !self.alive.load(Ordering::Relaxed) {
-            return;
-        }
-        if let Ok(mut g) = self.conn.try_lock() {
-            if let Some(ref mut c) = *g {
-                let pkt = build_uhid_mouse_packet(c.buttons, 0, 0, vwheel, hwheel);
                 if c.writer.write_all(&pkt).is_err() {
                     self.alive.store(false, Ordering::Release);
                 }
@@ -595,40 +652,32 @@ pub fn vk_to_android_keycode(vk: u16, extended: bool) -> Option<i32> {
     Some(kc)
 }
 
-/// Computes Android KeyEvent metastate bitmask from our own tracked held-modifier bits
-/// combined with Windows async key state (so swallowed Shift/Ctrl/Alt always work accurately!).
+/// Computes Android KeyEvent metastate bitmask strictly from our own tracked held-modifier bits
+/// (isolated from Windows GetAsyncKeyState so a modifier held during PC->TV switch never leaks!).
 pub unsafe fn android_metastate_from_held(held: u16) -> i32 {
     let mut m = 0i32;
-    let lshift = (held & HMOD_LSHIFT) != 0 || (GetAsyncKeyState(VK_LSHIFT as i32) as u16 & 0x8000) != 0;
-    let rshift = (held & HMOD_RSHIFT) != 0 || (GetAsyncKeyState(VK_RSHIFT as i32) as u16 & 0x8000) != 0;
-    if lshift {
+    if (held & HMOD_LSHIFT) != 0 {
         m |= AMETA_SHIFT_ON | AMETA_SHIFT_LEFT_ON;
     }
-    if rshift {
+    if (held & HMOD_RSHIFT) != 0 {
         m |= AMETA_SHIFT_ON | AMETA_SHIFT_RIGHT_ON;
     }
-    let lctrl = (held & HMOD_LCTRL) != 0 || (GetAsyncKeyState(VK_LCONTROL as i32) as u16 & 0x8000) != 0;
-    let rctrl = (held & HMOD_RCTRL) != 0 || (GetAsyncKeyState(VK_RCONTROL as i32) as u16 & 0x8000) != 0;
-    if lctrl {
+    if (held & HMOD_LCTRL) != 0 {
         m |= AMETA_CTRL_ON | AMETA_CTRL_LEFT_ON;
     }
-    if rctrl {
+    if (held & HMOD_RCTRL) != 0 {
         m |= AMETA_CTRL_ON | AMETA_CTRL_RIGHT_ON;
     }
-    let lalt = (held & HMOD_LALT) != 0 || (GetAsyncKeyState(VK_LMENU as i32) as u16 & 0x8000) != 0;
-    let ralt = (held & HMOD_RALT) != 0 || (GetAsyncKeyState(VK_RMENU as i32) as u16 & 0x8000) != 0;
-    if lalt {
+    if (held & HMOD_LALT) != 0 {
         m |= AMETA_ALT_ON | AMETA_ALT_LEFT_ON;
     }
-    if ralt {
+    if (held & HMOD_RALT) != 0 {
         m |= AMETA_ALT_ON | AMETA_ALT_RIGHT_ON;
     }
-    let lwin = (held & HMOD_LWIN) != 0 || (GetAsyncKeyState(VK_LWIN as i32) as u16 & 0x8000) != 0;
-    let rwin = (held & HMOD_RWIN) != 0 || (GetAsyncKeyState(VK_RWIN as i32) as u16 & 0x8000) != 0;
-    if lwin {
+    if (held & HMOD_LWIN) != 0 {
         m |= AMETA_META_ON | AMETA_META_LEFT_ON;
     }
-    if rwin {
+    if (held & HMOD_RWIN) != 0 {
         m |= AMETA_META_ON | AMETA_META_RIGHT_ON;
     }
     if (GetKeyState(VK_CAPITAL as i32) & 1) != 0 {
