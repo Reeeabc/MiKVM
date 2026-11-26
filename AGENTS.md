@@ -73,8 +73,11 @@ MiKVM/
 ├── .github/workflows/release.yml  # CI build + automatic dual-zip GitHub Release publisher
 └── src/
     ├── main.rs                    # Single-instance mutex, tray host, WM_INPUT/DISPLAY/POWER/SETTING hub
+    ├── diag.rs                    # Opt-in rotating diagnostic logger (DebugLog=True / --debug-log -> mikvm.log)
     ├── config.rs                  # config.ini loader/saver (UTF-8 BOM safe), theme query, PATH discovery, autostart
-    ├── adb.rs                     # ADB runner, status query, force-reconnect, size-checked jar deploy, MiTVDaemon worker
+    ├── ddc.rs                     # Rootless DDC/CI VCP 0x10 brightness via dynamic dxva2.dll (MinGW & MSVC safe)
+    ├── lan_scan.rs                # Concurrent /24 LAN port-5555 ADB scanner via dynamic iphlpapi.dll + prop ranking
+    ├── adb.rs                     # ADB runner, status query, force-reconnect, DDC fallback, MiTVDaemon worker
     ├── scrcpy_proto.rs            # Direct scrcpy-server 3.0+ TCP client, UHID mouse, primed burst, keys, clipboard
     ├── display.rs                 # QueryDisplayConfig topology, Xiaomi EDID 0xA961, lid/sleep/resume power events
     ├── clipboard.rs               # Win32 CF_UNICODETEXT sync with password-manager privacy format filtering
@@ -132,6 +135,7 @@ MiKVM/
    - On `PBT_APMSUSPEND`, active TV hooks and sockets are torn down immediately so wake never freezes input; on `PBT_APMRESUMEAUTOMATIC`/`PBT_APMRESUMESUSPEND` (3s debounced) or unexpected `WM_CONTROL_EXITED` (Wi-Fi drop), bounded backoff recovery runs `DeviceController::reconnect_force()` (`adb disconnect` + `connect`) and silently restores into safe `TvStandby` (never stealing PC focus) or cleanly exits via `WM_DP_RETURNED` if the TV already switched back to DP.
    - `ActivityThread.systemMain()` spawns non-daemon binder threads inside `app_process`. Both `MiTVDaemon.java` and `MiTVEdge.java` MUST call `System.exit(0)` after `Q`/EOF!
    - `DeviceController` keeps `MiTVDaemon` warm ONLY while flyout is open or a TV session is active, and auto-shuts it down after 25s idle (`DAEMON_IDLE_SECS = 25`), plus explicit `stop_daemon_now()` on exit.
+   - Keep `dxva2.dll` (`src/ddc.rs`, rootless DDC/CI VCP `0x10` fallback) and `iphlpapi.dll` (`src/lan_scan.rs`, local IPv4 subnet enumeration) dynamically loaded via `LoadLibraryW` + `GetProcAddress` so MinGW GNU and MSVC builds stay 100% warning-free with zero extra static link libraries.
 
 9. **Agent Hidden-Desktop Constraint (Windows)**
    - Automated shell commands run on an isolated Windows desktop where `Shell_TrayWnd = 0`.

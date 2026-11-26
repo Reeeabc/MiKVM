@@ -11,7 +11,10 @@ MiKVM 刻意保持**零重型框架**架构（无 Electron / Tauri / WebView2 / 
 | 模块 | 职责 | 平台相关性 |
 | :--- | :--- | :---: |
 | `src/config.rs` | `config.ini` 读写（兼容 UTF-8 BOM）、`assets/` 与 `scrcpy/`（含系统 `PATH`）路径解析、系统浅色/深色主题查询、开机自启注册表 | 主体跨平台（仅自启/主题为 Win32） |
-| `src/adb.rs` | ADB 命令执行、设备状态合并查询、自动校验并推送 `assets/*.jar`、常驻按键 shell 管道、`MiTVDaemon` 单队列合并与按需保活工作线程 | **跨平台**（仅隐藏窗口 flag 为 Win32） |
+| `src/diag.rs` | 默认关闭的零开销按需诊断日志（`DebugLog=True` 或 `--debug-log`，写同目录 `mikvm.log`，512 KB 自动轮转） | 平台层（Windows 时间戳） |
+| `src/ddc.rs` | 动态加载内置 `dxva2.dll`（VCP `0x10`），免 Root 直调 DP/HDMI 显示器物理背光 | 平台层（Windows） |
+| `src/lan_scan.rs` | 动态调用 `iphlpapi.dll` 枚举私网 `/24` 网段、32 线程并发扫描 5555 端口并通过 `getprop` 优先识别小米/红米机型 | 平台层（Windows） |
+| `src/adb.rs` | ADB 命令执行、设备状态合并查询、自动校验并推送 `assets/*.jar`、常驻按键 shell 管道、`MiTVDaemon` 单队列合并与按需保活工作线程（未 Root 时背光自动走 `ddc.rs`、音量走 `cmd media_session`） | **跨平台**（仅隐藏窗口 flag 为 Win32） |
 | `src/scrcpy_proto.rs` | 纯 Rust 直连 `scrcpy-server` 控制通道（`adb forward` + TCP）、UHID 67 字节虚拟相对鼠标、VelocityControl 预激发单帧突发移动、Android 按键/组合键注入与双向剪贴板报文 | **100% 跨平台** |
 | `src/display.rs` | `QueryDisplayConfig` 多屏拓扑检测、小米/红米 EDID（`0xA961`）识别、合盖与系统休眠/唤醒事件（`WM_POWERBROADCAST`）、多屏防幽灵弹窗定位、可选临时切「仅电脑屏幕」与还原 | 平台层（Windows） |
 | `src/clipboard.rs` | Win32 `CF_UNICODETEXT` 读写与密码管理器隐私剪贴板格式过滤（`ExcludeClipboardContentFromMonitorProcessing` / `CanIncludeInClipboardHistory`） | 平台层（Windows） |
@@ -50,7 +53,7 @@ MiKVM 刻意保持**零重型框架**架构（无 Electron / Tauri / WebView2 / 
              └─ 空闲满 25 秒自动发送 "Q\n" -> MiTVDaemon 执行 System.exit(0) 退出（待机 0 额外内存）
 ```
 
-> **免 Root 降级路径**：若电视未 Root 导致 `MiTVDaemon` 启动失败，音量调节自动回退至原生免 Root 命令 `cmd media_session volume --stream 3 --set <v>`（实测 ~68 ms）。
+> **免 Root 降级路径**：若电视未 Root 导致 `MiTVDaemon` 启动失败，电脑 DP/HDMI 模式下的背光自动通过原生 **DDC/CI（`dxva2.dll` VCP `0x10`）** 免 Root 直调，音量调节自动回退至免 Root 命令 `cmd media_session volume --stream 3 --set <v>`（实测 ~68 ms）。
 
 ### 2.2 `MiTVDaemon` 文本协议（stdin / stdout）
 
@@ -109,6 +112,7 @@ EdgeResistancePc=120
 EdgeResistanceTv=180
 ClipboardSync=True
 AutoInternalOnTv=False
+DebugLog=False
 TvMonitorHint=Mi Monitor
 TvEdgeSide=Left
 DpInput=29
