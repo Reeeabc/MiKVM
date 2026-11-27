@@ -378,6 +378,10 @@ pub(super) fn create_edge_trigger_window() -> HWND {
     }
 }
 
+pub(super) fn rects_overlap(a: &RECT, b: &RECT) -> bool {
+    a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top
+}
+
 pub(super) fn show_edge_trigger_window(hwnd: HWND, topo: &DisplayTopology) {
     if hwnd.is_null() {
         return;
@@ -390,6 +394,25 @@ pub(super) fn show_edge_trigger_window(hwnd: HWND, topo: &DisplayTopology) {
         hide_edge_trigger_window(hwnd);
         return;
     };
+    // Safety invariant: an invisible topmost ghost trigger window must NEVER overlap any visible
+    // PC monitor (e.g. during transient SetDisplayConfig transitions), or it would eat PC clicks!
+    if topo.edge_trigger_is_ghost
+        && topo
+            .visible_pc_monitors
+            .iter()
+            .any(|m| rects_overlap(&rect, &m.rect))
+    {
+        diag_log!(
+            "EDGE",
+            "suppressed ghost trigger overlapping visible PC monitor rect=({},{},{},{})",
+            rect.left,
+            rect.top,
+            rect.right,
+            rect.bottom
+        );
+        hide_edge_trigger_window(hwnd);
+        return;
+    }
     let fallback_span = topo
         .pc_fence_rect
         .or_else(|| topo.visible_pc_monitors.first().map(|m| m.rect))
@@ -403,6 +426,18 @@ pub(super) fn show_edge_trigger_window(hwnd: HWND, topo: &DisplayTopology) {
     } else {
         fallback_span
     };
+    diag_log!(
+        "EDGE",
+        "show trigger side={:?} ghost={} rect=({},{},{},{}) span=({},{})",
+        side,
+        topo.edge_trigger_is_ghost,
+        rect.left,
+        rect.top,
+        rect.right,
+        rect.bottom,
+        seam_span.0,
+        seam_span.1
+    );
     if let Ok(mut g) = EDGE_CFG.lock() {
         *g = Some(EdgeRuntimeCfg {
             side,
@@ -627,5 +662,16 @@ mod tests {
             compute_pc_entry_ratio_10k(EdgeSide::Top, (-2000, 0), POINT { x: -500, y: -5 }),
             7500
         );
+    }
+
+    #[test]
+    fn ghost_overlap_guard_detects_real_overlap_only() {
+        let tv = RECT { left: 0, top: 0, right: 3840, bottom: 2160 };
+        let adjacent_pc = RECT { left: 3840, top: 560, right: 6400, bottom: 2160 };
+        let single_screen_pc = RECT { left: 0, top: 0, right: 2560, bottom: 1600 };
+        // Touching strictly on the seam edge is NOT an overlap
+        assert!(!rects_overlap(&tv, &adjacent_pc));
+        // Sharing interior desktop space (e.g. during AutoInternalOnTv transition) IS an overlap
+        assert!(rects_overlap(&tv, &single_screen_pc));
     }
 }

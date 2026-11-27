@@ -6,7 +6,7 @@ use crate::scrcpy_proto::{
     MOUSE_BTN_LEFT, MOUSE_BTN_RIGHT,
 };
 use std::ptr;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
@@ -225,6 +225,36 @@ pub(super) fn set_raw_input_device(host_hwnd: HWND, enable: bool) -> bool {
     }
 }
 
+static DEAD_CLIENT_NOTIFIED: AtomicBool = AtomicBool::new(false);
+
+pub(super) fn reset_dead_client_guard() {
+    DEAD_CLIENT_NOTIFIED.store(false, Ordering::Release);
+}
+
+/// Verifies the TV control channel is still alive before low-level hooks swallow PC input.
+/// If dead while still in a TV-capturing mode, posts `WM_CONTROL_EXITED` immediately (once)
+/// and returns `false` so hooks pass mouse/keyboard events straight through to Windows.
+fn is_tv_channel_live_or_bail() -> bool {
+    match GLOBAL_CLIENT.try_lock() {
+        Ok(g) => match *g {
+            Some(ref c) if c.is_alive() => true,
+            _ => {
+                if !DEAD_CLIENT_NOTIFIED.swap(true, Ordering::AcqRel) {
+                    diag_log!("HOOK", "dead TV channel detected in hook; passing input to PC & triggering exit");
+                    let host = HOST_HWND_GLOBAL.load(Ordering::Acquire);
+                    if host != 0 {
+                        unsafe {
+                            PostMessageW(host as HWND, WM_CONTROL_EXITED, 0, 0);
+                        }
+                    }
+                }
+                false
+            }
+        },
+        Err(_) => true,
+    }
+}
+
 pub(super) fn install_keyboard_hook() {
     if KEY_HOOK.load(Ordering::Relaxed) != 0 {
         return;
@@ -233,6 +263,7 @@ pub(super) fn install_keyboard_hook() {
         let hmod = GetModuleHandleW(ptr::null());
         let hk = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), hmod, 0);
         KEY_HOOK.store(hk as isize, Ordering::Release);
+        diag_log!("HOOK", "install WH_KEYBOARD_LL ok={}", !hk.is_null());
     }
 }
 
@@ -243,6 +274,7 @@ pub(super) fn uninstall_keyboard_hook() {
         unsafe {
             UnhookWindowsHookEx(hk);
         }
+        diag_log!("HOOK", "uninstall WH_KEYBOARD_LL");
     }
 }
 
@@ -254,6 +286,7 @@ pub(super) fn install_mouse_hook() {
         let hmod = GetModuleHandleW(ptr::null());
         let hk = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_proc), hmod, 0);
         MOUSE_HOOK.store(hk as isize, Ordering::Release);
+        diag_log!("HOOK", "install WH_MOUSE_LL ok={}", !hk.is_null());
     }
 }
 
@@ -263,6 +296,7 @@ pub(super) fn uninstall_mouse_hook() {
         unsafe {
             UnhookWindowsHookEx(hk);
         }
+        diag_log!("HOOK", "uninstall WH_MOUSE_LL");
     }
 }
 
@@ -454,6 +488,17 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wp: WPARAM, lp: LPARAM) 
                     return 1;
                 }
             } else if mode.is_tv_capturing() {
+                // Never swallow PC keyboard events into a dead control channel!
+                if !is_tv_channel_live_or_bail() {
+                    if is_up {
+                        let hmod_bit = vk_to_hmod(vk);
+                        if hmod_bit != 0 {
+                            HELD_MODS.fetch_and(!hmod_bit, Ordering::Relaxed);
+                        }
+                        swallowed_clear(vk);
+                    }
+                    return CallNextHookEx(KEY_HOOK.load(Ordering::Relaxed) as HHOOK, code, wp, lp);
+                }
                 // Capture EVERY physical key for TV -> zero Windows focus / IME disturbance!
                 let hmod_bit = vk_to_hmod(vk);
                 if is_down {
@@ -512,6 +557,10 @@ unsafe extern "system" fn keyboard_hook_proc(code: i32, wp: WPARAM, lp: LPARAM) 
 
 unsafe extern "system" fn mouse_hook_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     if code >= 0 && current_mode().is_tv_capturing() {
+        if !is_tv_channel_live_or_bail() {
+            TV_LBUTTON_DOWN.store(false, Ordering::Relaxed);
+            return CallNextHookEx(MOUSE_HOOK.load(Ordering::Relaxed) as HHOOK, code, wp, lp);
+        }
         let ms = &*(lp as *const MSLLHOOKSTRUCT);
         if (ms.flags & LLMHF_INJECTED_FLAG) == 0 {
             let msg = wp as u32;
