@@ -77,7 +77,7 @@ MiKVM 放弃了外挂 `scrcpy.exe` 隐形窗口方案，改由 Rust 原生客户
   - `TvStandby`：多屏模式且焦点切回电脑（显示器画面仍保持在电视系统）；卸载鼠标钩子与原始输入，仅保留 `ReturnDp` 与 `ToggleFocus` 两个待命全局热键，并在电脑接缝边启用可调阻力的跨屏触发墙。
 - **PC ↔ TV 双向无缝跨屏与单帧高度对齐**：
   - **PC → TV**：扩展屏下按两屏**实际重叠接缝区间（`seam_span`）**换算入口比例（支持双屏错位、上下叠屏及三屏组合拼接），覆盖幽灵电视屏区域实现带 `260ms` 停顿衰减的弹性推力墙（`EdgeResistancePc`, `0~300`）；扩展模式自动识别的 `TvEdgeSide` 在启动、排列变化及 `AutoInternalOnTv` 切单屏前实时落盘至 `config.ini`；仅电脑屏下采用 2px 边缘驻留触发。切入电视瞬间，利用实测的 Android 14 `VelocityControl`（`3.000x`）特性发送 **预激发单帧突发（Primed Burst）**——同一 TCP 写入内先发 1 包 `(pin_dx, 0)` 预热加速曲线，紧接 `(0, sy)` 纵向位移包，首帧即以 **`±1px` 精度**直达对齐高度（消除可见跳跃），并配 `160ms` 闭环校验与在线自适应校准。
-  - **TV → PC**：免 Root 电视端 [MiTVEdge.java](file:///D:/develop/projects/mitv/MiKVM/assets/MiTVEdge.java) 监听 3px 透明边沿 `HOVER` 坐标，结合电脑端 `WM_INPUT` 外推位移累计超过 `EdgeResistanceTv`（`0~300`）即刻按实际重叠接缝区间精确映射滑回对应电脑屏。
+  - **TV → PC**：免 Root 电视端 [MiTVEdge.java](../assets/MiTVEdge.java) 监听 3px 透明边沿 `HOVER` 坐标，结合电脑端 `WM_INPUT` 外推位移累计超过 `EdgeResistanceTv`（`0~300`）即刻按实际重叠接缝区间精确映射滑回对应电脑屏。
 - **对称位置记忆 & 按需剪贴板同步**：
   - 按 `ToggleFocus`（默认 `Ctrl+Alt+S`）在 PC 与电视间切换时，双方各自保留上次离开时的光标位置；进入电视前通过 `SendInput` 干净释放电脑端按住的组合修饰键，防止切屏卡键。
   - 每次切入电视按需将电脑新剪贴板推送至电视（跳过含密码管理器隐私标记的剪贴板），电视复制文本时通过 `DEV_TYPE_CLIPBOARD` 自动同步回电脑。
@@ -102,7 +102,7 @@ MiKVM 放弃了外挂 `scrcpy.exe` 隐形窗口方案，改由 Rust 原生客户
 
 ## 3. 配置项参考（`config.ini`）
 
-位于可执行文件同级目录（首次运行自动生成，Git 忽略以防泄露个人 IP；完整示例见 [config.example.ini](file:///D:/develop/projects/mitv/MiKVM/config.example.ini)）：
+位于可执行文件同级目录（首次运行自动生成，Git 忽略以防泄露个人 IP；完整示例见 [config.example.ini](../config.example.ini)）：
 
 ```ini
 TvAddress=192.168.1.200:5555

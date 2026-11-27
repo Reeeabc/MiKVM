@@ -11,37 +11,27 @@
 - **Tech Stack**: Pure **Rust** + native **Win32 / GDI+ / DWM / Raw Input / QueryDisplayConfig** with a single crate dependency (`windows-sys = "0.59"`). Direct TCP client to `scrcpy-server` (no `scrcpy.exe`, SDL3, or FFmpeg process!).
 - **Non-Negotiable Quality Targets**:
   - **Zero external runtime dependencies** (only built-in Windows system DLLs — never link MinGW runtime DLLs, VC++ redist, `.NET`, or WebView2).
-  - **Ultra-small binary**: ~500 KB stripped LTO release `.exe` (`opt-level = "z"`, `lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true`).
+  - **Ultra-small binary**: ~550 KB stripped LTO release `.exe` (`opt-level = "z"`, `lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true`).
   - **Ultra-low memory**: ~3–6 MB steady-state Private Working Set, **0% idle CPU**, **0 extra idle child processes** on both PC and TV.
-  - **Clean C: drive policy (local machine)**: Never install toolchains, SDKs, or build caches on `C:`.
 
 ---
 
-## 2. Local Environment & Build Commands
+## 2. Build, Test & Release Commands
 
-### Local Toolchain Paths (Windows)
-- Rust: `RUSTUP_HOME=D:\develop\rustup`, `CARGO_HOME=D:\develop\cargo` (`stable-x86_64-pc-windows-gnu`)
-- MinGW GCC / `windres` / `objdump`: `D:\develop\mingw64\bin`
-- JDK (`javac` / `java`): `D:\develop\Java\jdk\bin`
-- Repository root: `D:\develop\projects\mitv\MiKVM` (remote `origin` uses SSH: `git@github.com:Reeeabc/MiKVM.git`)
-- Legacy C# v1.0 reference is preserved permanently on git tag `v1.0-csharp`.
+> If a gitignored `AGENTS.local.md` exists in the repository root, read it first for local machine toolchain paths and environment overrides.
 
-### Build & Test `MiKVM.exe` Locally (PowerShell)
+### Build & Test `MiKVM.exe` (Windows — MSVC or MinGW/GNU)
 ```powershell
-$env:RUSTUP_HOME = "D:\develop\rustup"
-$env:CARGO_HOME = "D:\develop\cargo"
-$env:Path = "D:\develop\cargo\bin;D:\develop\mingw64\bin;$env:Path"
-Set-Location "D:\develop\projects\mitv\MiKVM"
 cargo test
 cargo build --release
 Copy-Item "target\release\MiKVM.exe" ".\MiKVM.exe" -Force
-# Verify zero non-system DLL dependencies:
+# Verify zero non-system DLL dependencies (MinGW objdump or MSVC dumpbin /dependents):
 objdump -p ".\MiKVM.exe" | Select-String "DLL Name"
 ```
 Expected DLL list ONLY (Windows system DLLs): `advapi32`, `api-ms-win-core-synch-l1-2-0`, `api-ms-win-shcore-scaling-l1-1-1`, `dwmapi`, `gdi32`, `gdiplus`, `KERNEL32`, `msvcrt`, `ntdll`, `ole32`, `shell32`, `user32`, `ws2_32`.
 
 ### Rebuild `assets/MiTVDaemon.jar` or `assets/MiTVEdge.jar`
-Compile with Java 8 bytecode (`D:\develop\Java\jdk\bin\javac.exe --release 8 -d target\dex_tmp\out assets\<Name>.java`; for `MiTVEdge.java`, pass `-sourcepath target\dex_tmp\stubs` with compile-only `android.content.{Context,ContextWrapper,ContentResolver,IContentProvider,AttributionSource}` stubs), then `Set-Location target\dex_tmp\out` and run `java -cp ..\dalvik-dx.jar com.android.dx.command.Main --dex --no-strict --output=...\assets\<Name>.jar <Name>*.class` (excluding `android/` stub classes; download `dalvik-dx-9.0.0_r3.jar` temporarily into `target/dex_tmp/` on `D:` and delete `target/dex_tmp/` immediately afterward — never cache on `C:`). Note that `ensure_jars_deployed()` compares file size (`wc -c`) so changed jar sizes auto-push to the TV on connect.
+Compile with Java 8 bytecode (`javac --release 8 -d target\dex_tmp\out assets\<Name>.java`; for `MiTVEdge.java`, pass `-sourcepath target\dex_tmp\stubs` with compile-only `android.content.{Context,ContextWrapper,ContentResolver,IContentProvider,AttributionSource}` stubs), then `Set-Location target\dex_tmp\out` and run `java -cp ..\dalvik-dx.jar com.android.dx.command.Main --dex --no-strict --output=...\assets\<Name>.jar <Name>*.class` (excluding `android/` stub classes; keep temporary `dalvik-dx-9.0.0_r3.jar` inside `target/dex_tmp/` and delete `target/dex_tmp/` immediately afterward). Note that `ensure_jars_deployed()` compares file size (`wc -c`) so changed jar sizes auto-push to the TV on connect.
 
 ### Release Process (GitHub Actions)
 - Pushing any `v*` tag (create with `git tag -a vX.Y.Z --cleanup=verbatim -F <notes.txt> && git push origin vX.Y.Z`) triggers `.github/workflows/release.yml` on `windows-latest` (MSVC).
@@ -148,7 +138,7 @@ MiKVM/
    - NEVER leave `MiKVM.exe` running from an automated shell command — it would hold `Local\MiKVM_SingleInstance` invisibly and prevent the user from launching their real tray icon!
 
 10. **Repository Security & Hygiene**
-    - NEVER commit: `config.ini` (personal LAN IP), `scrcpy/`, `*.exe`, `target/`, `Cargo.lock`, `*.jks`, `*.keystore`.
+    - NEVER commit: `AGENTS.local.md` (local toolchain paths), `config.ini` (personal LAN IP), `scrcpy/`, `*.exe`, `target/`, `Cargo.lock`, `*.jks`, `*.keystore`.
 
 ---
 
