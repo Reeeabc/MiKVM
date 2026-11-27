@@ -24,7 +24,7 @@ MiKVM 刻意保持**零重型框架**架构（无 Electron / Tauri / WebView2 / 
 | `src/settings_ui.rs` / `src/keymap_ui.rs` | 原生 Win32 ComCtl32 v6 多屏设置窗口（含深色标题栏与控件主题）与临时低级钩子按键录制窗口 | 平台层（Windows） |
 | `src/main.rs` | 单实例互斥锁、系统托盘消息循环（`WM_INPUT` / `WM_DISPLAYCHANGE` / `WM_POWERBROADCAST` / `WM_SETTINGCHANGE`）与各子系统调度中枢 | 平台层（Windows） |
 | `assets/MiTVDaemon.java` | 电视端 3 KB 极轻常驻桥接进程，消除 `app_process` ART 虚拟机反复冷启动开销 | Android / MT9655 电视端 |
-| `assets/MiTVEdge.java` | 电视端 6.8 KB 免 Root 3px 透明边沿悬浮传感器，实现电视 → 电脑双向滑边与精确 `y` 坐标回传 | Android TV（免 Root） |
+| `assets/MiTVEdge.java` | 电视端 8.5 KB 完全自包含免 Root 3px 透明边沿悬浮传感器（内置 `SafeContentResolver` / `ShellContext`，零 `scrcpy-server` 类依赖），实现电视 → 电脑双向滑边与精确 `y` 坐标回传 | Android TV（免 Root） |
 | `extras/Fcitx5TvFix/` | 可选 Xposed / Vector 模块，修复 Fcitx5 在 HyperOS TV 非输入框界面的焦点与方向键拦截 | Android TV（仅 Root + Fcitx5） |
 
 ---
@@ -76,19 +76,19 @@ MiKVM 放弃了外挂 `scrcpy.exe` 隐形窗口方案，改由 Rust 原生客户
   - `TvFocused`：多屏模式且当前键鼠焦点在电视；安装 `WH_KEYBOARD_LL` + `WH_MOUSE_LL` + `WM_INPUT` 原始鼠标增量（通过 `HELD_MODS` 独立追踪修饰键并临时禁用 5 连 Shift 粘滞键弹窗），同时将 Windows 光标隐身停泊至不可见区。
   - `TvStandby`：多屏模式且焦点切回电脑（显示器画面仍保持在电视系统）；卸载鼠标钩子与原始输入，仅保留 `ReturnDp` 与 `ToggleFocus` 两个待命全局热键，并在电脑接缝边启用可调阻力的跨屏触发墙。
 - **PC ↔ TV 双向无缝跨屏与单帧高度对齐**：
-  - **PC → TV**：扩展屏下覆盖幽灵电视屏区域实现带 `260ms` 停顿衰减的弹性推力墙（`EdgeResistancePc`, `0~300`）；仅电脑屏下采用 2px 边缘驻留触发。切入电视瞬间，利用实测的 Android 14 `VelocityControl`（`3.000x`）特性发送 **预激发单帧突发（Primed Burst）**——同一 TCP 写入内先发 1 包 `(pin_dx, 0)` 预热加速曲线，紧接 `(0, sy)` 纵向位移包，首帧即以 **`±1px` 精度**直达对齐高度（消除可见跳跃），并配 `160ms` 闭环校验与在线自适应校准。
-  - **TV → PC**：免 Root 电视端 [MiTVEdge.java](file:///D:/develop/projects/mitv/MiKVM/assets/MiTVEdge.java) 监听 3px 透明边沿 `HOVER` 坐标，结合电脑端 `WM_INPUT` 外推位移累计超过 `EdgeResistanceTv`（`0~300`）即刻按对应 `y` 高度滑回电脑。
+  - **PC → TV**：扩展屏下按两屏**实际重叠接缝区间（`seam_span`）**换算入口比例（支持双屏错位、上下叠屏及三屏组合拼接），覆盖幽灵电视屏区域实现带 `260ms` 停顿衰减的弹性推力墙（`EdgeResistancePc`, `0~300`）；扩展模式自动识别的 `TvEdgeSide` 在启动、排列变化及 `AutoInternalOnTv` 切单屏前实时落盘至 `config.ini`；仅电脑屏下采用 2px 边缘驻留触发。切入电视瞬间，利用实测的 Android 14 `VelocityControl`（`3.000x`）特性发送 **预激发单帧突发（Primed Burst）**——同一 TCP 写入内先发 1 包 `(pin_dx, 0)` 预热加速曲线，紧接 `(0, sy)` 纵向位移包，首帧即以 **`±1px` 精度**直达对齐高度（消除可见跳跃），并配 `160ms` 闭环校验与在线自适应校准。
+  - **TV → PC**：免 Root 电视端 [MiTVEdge.java](file:///D:/develop/projects/mitv/MiKVM/assets/MiTVEdge.java) 监听 3px 透明边沿 `HOVER` 坐标，结合电脑端 `WM_INPUT` 外推位移累计超过 `EdgeResistanceTv`（`0~300`）即刻按实际重叠接缝区间精确映射滑回对应电脑屏。
 - **对称位置记忆 & 按需剪贴板同步**：
   - 按 `ToggleFocus`（默认 `Ctrl+Alt+S`）在 PC 与电视间切换时，双方各自保留上次离开时的光标位置；进入电视前通过 `SendInput` 干净释放电脑端按住的组合修饰键，防止切屏卡键。
   - 每次切入电视按需将电脑新剪贴板推送至电视（跳过含密码管理器隐私标记的剪贴板），电视复制文本时通过 `DEV_TYPE_CLIPBOARD` 自动同步回电脑。
 - **常驻 shell `DP Watcher`**：单条长连 `adb shell` 循环检测 `ExternalSourceActivity`，免除高频拉起短命 `adb.exe` 进程，在电视界面切回 DP 时毫秒级自动释控并还原临时显示配置。
-- **休眠唤醒与 Wi-Fi 瞬断自愈**：
+- **休眠唤醒、Wi-Fi 瞬断与换 IP 自愈**：
   - `PBT_APMSUSPEND` 挂起前自动释放钩子与长连管道，防止唤醒卡死；`PBT_APMRESUMEAUTOMATIC` / `PBT_APMRESUMESUSPEND` 唤醒后（3 秒防抖）清理僵尸 ADB 管道，待网卡恢复后静默探测电视信号源，若仍在电视系统则自动恢复会话至安全的 `TvStandby` 待命态（不抢占电脑焦点）。
-  - Wi-Fi 瞬断导致控制通道意外断开（`WM_CONTROL_EXITED`）时，立刻归还电脑键鼠控制权，后台按 `1s → 2s → 4s` 退避执行 `adb disconnect` + `connect` 强制重连；若检测到显示器已回 DP 则正常收尾，若仍在电视则无感恢复待命，3 次仍失败才退出并托盘提示。
+  - Wi-Fi 瞬断导致控制通道意外断开（`WM_CONTROL_EXITED`）时，立刻归还电脑键鼠控制权，后台按 `1s → 2s → 4s` 退避执行 `adb disconnect` + `connect` 强制重连；若原 IP 连续失败（如路由器重启 DHCP 重分 IP），自动按网段执行一次 `lan_scan::rediscover_xiaomi_tv`（仅采纳已验证的小米/红米机型），找回新 IP 后自动更新落盘 `config.ini`、托盘提示并静默重连（点击切源或手动重连红点遇到失联时同样自动找回）。
 
 ### 2.4 `MiTVEdge` 文本协议（stdin / stdout）
 
-`MiTVEdge.jar` 通过 `CLASSPATH=/data/local/tmp/MiTVEdge.jar:/data/local/tmp/scrcpy-server.jar` 在 `com.android.shell`（`uid 2000` + `appops set com.android.shell SYSTEM_ALERT_WINDOW allow`）下免 Root 运行，复用 `scrcpy-server` 内的 `Workarounds.apply()` 与 `FakeContext.get()` 解决 Android 14 `app_process` 挂载 `TYPE_APPLICATION_OVERLAY` 的权限与 `ContentResolver` 限制：
+`MiTVEdge.jar` 完全自包含（仅需 `CLASSPATH=/data/local/tmp/MiTVEdge.jar`，不依赖 `scrcpy-server.jar` 内部类），在 `com.android.shell`（`uid 2000` + `appops set com.android.shell SYSTEM_ALERT_WINDOW allow`）下免 Root 运行，内置轻量 `SafeContentResolver`（动态 `IContentProvider` 代理）、`ShellContext` 与 `ActivityThread` 初始化逻辑，兼容 Android 10–15+ `app_process` 挂载 `TYPE_APPLICATION_OVERLAY`：
 
 | 方向 | 报文 | 说明 |
 | :--- | :--- | :--- |
