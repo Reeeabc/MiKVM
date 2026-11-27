@@ -44,7 +44,10 @@ Expected DLL list ONLY (Windows system DLLs): `advapi32`, `api-ms-win-core-synch
 Compile with Java 8 bytecode (`D:\develop\Java\jdk\bin\javac.exe --release 8 -d target\dex_tmp\out assets\<Name>.java`; for `MiTVEdge.java`, pass `-sourcepath target\dex_tmp\stubs` with compile-only `android.content.{Context,ContextWrapper,ContentResolver,IContentProvider,AttributionSource}` stubs), then `Set-Location target\dex_tmp\out` and run `java -cp ..\dalvik-dx.jar com.android.dx.command.Main --dex --no-strict --output=...\assets\<Name>.jar <Name>*.class` (excluding `android/` stub classes; download `dalvik-dx-9.0.0_r3.jar` temporarily into `target/dex_tmp/` on `D:` and delete `target/dex_tmp/` immediately afterward — never cache on `C:`). Note that `ensure_jars_deployed()` compares file size (`wc -c`) so changed jar sizes auto-push to the TV on connect.
 
 ### Release Process (GitHub Actions)
-- Pushing any `v*` tag (e.g., `git tag -a v2.1.0 -m "..." && git push origin v2.1.0`) triggers `.github/workflows/release.yml` on `windows-latest` (MSVC).
+- Pushing any `v*` tag (create with `git tag -a vX.Y.Z --cleanup=verbatim -F <notes.txt> && git push origin vX.Y.Z`) triggers `.github/workflows/release.yml` on `windows-latest` (MSVC).
+- **Release Title & Notes Style Convention**:
+  - Keep the GitHub Release title strictly as pure **`vX.Y.Z`** (enforced automatically by `name: ${{ github.ref_name }}`); any tag summary line is automatically placed as `## <summary>` at the top of Release Notes.
+  - Keep Release Notes **clean, concise, and user-facing** (crisp highlights + download guide; avoid verbose low-level implementation details).
 - Automatically produces and attaches to GitHub Releases:
   - `MiKVM-windows-x64-full.zip` (bundles official `adb` + `scrcpy-server` under `scrcpy/`)
   - `MiKVM-windows-x64-lite.zip` (~200 KB binary + `assets/*.jar` + docs)

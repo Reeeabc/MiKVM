@@ -97,13 +97,21 @@ jobs:
           Write-Host "Tag $tag object type: $objType"
           $subject = (git -c i18n.logOutputEncoding=UTF-8 tag -l --format="%(contents:subject)" $tag | Out-String).Trim()
           $body = (git -c i18n.logOutputEncoding=UTF-8 tag -l --format="%(contents:body)" $tag | Out-String).Trim()
-          if (-not $subject) { $subject = $tag }
-          $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
-          [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, "title=$subject`n", $utf8NoBom)
+          # Keep Release title clean as pure `vX.Y.Z`; move any tag summary line to top of Release Notes
+          $subtitle = $subject -replace "^$([regex]::Escape($tag))\s*[—\-:：]?\s*", ""
+          $parts = @()
+          if ($subtitle -and ($subtitle -ne $tag)) {
+            $parts += "## $subtitle"
+          }
           if ($body) {
-            [System.IO.File]::WriteAllText((Join-Path $PWD "dist/RELEASE_NOTES.md"), $body, $utf8NoBom)
+            $parts += $body
+          }
+          $notes = ($parts -join "`n`n").Trim()
+          $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+          if ($notes) {
+            [System.IO.File]::WriteAllText((Join-Path $PWD "dist/RELEASE_NOTES.md"), $notes, $utf8NoBom)
             [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, "has_notes=true`n", $utf8NoBom)
-            Write-Host "Extracted release notes ($($body.Length) chars) from tag $tag"
+            Write-Host "Prepared release notes ($($notes.Length) chars) for $tag"
           } else {
             [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, "has_notes=false`n", $utf8NoBom)
           }
@@ -112,7 +120,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v') && steps.relmeta.outputs.has_notes == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          name: ${{ steps.relmeta.outputs.title }}
+          name: ${{ github.ref_name }}
           body_path: dist/RELEASE_NOTES.md
           generate_release_notes: false
           files: |
@@ -125,7 +133,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v') && steps.relmeta.outputs.has_notes != 'true'
         uses: softprops/action-gh-release@v2
         with:
-          name: ${{ steps.relmeta.outputs.title }}
+          name: ${{ github.ref_name }}
           generate_release_notes: true
           files: |
             dist/MiKVM-windows-x64-full.zip
