@@ -101,6 +101,7 @@ impl TakeoverSession {
 
         let edge_hwnd = create_edge_trigger_window();
         let topo = query_display_topology(&tv_hint, true, fallback_side);
+        persist_detected_edge_side(&cfg, &topo);
 
         Self {
             scrcpy_dir,
@@ -176,16 +177,8 @@ impl TakeoverSession {
             .unwrap_or_else(|_| ("Mi Monitor".to_string(), EdgeSide::Left));
         let lid = self.lid_open.load(Ordering::Acquire);
         self.topo = query_display_topology(&hint, lid, fallback);
-        // Remember auto-detected physical side whenever Extend mode gives us a real seam
-        if self.topo.edge_trigger_is_ghost {
-            if let Some(side) = self.topo.edge_side {
-                if let Ok(mut c) = self.cfg.lock() {
-                    if c.tv_edge_side != side {
-                        c.tv_edge_side = side;
-                    }
-                }
-            }
-        }
+        // Remember & persist auto-detected physical side whenever Extend mode gives us a real seam
+        persist_detected_edge_side(&self.cfg, &self.topo);
     }
 
     /// Blocking connect called on background worker thread; posts WM_CONTROL_READY on success.
@@ -220,17 +213,20 @@ impl TakeoverSession {
         self.recovering.store(false, Ordering::Release);
         self.suspended_was_active = false;
         self.sync_config();
+        // Capture & persist the real Extend seam side BEFORE AutoInternalOnTv collapses to single-screen!
+        self.refresh_topology();
         let (auto_internal, tv_hint) = self
             .cfg
             .lock()
             .map(|c| (c.auto_internal_on_tv, c.tv_monitor_hint.clone()))
             .unwrap_or((false, "Mi Monitor".to_string()));
-        if auto_internal {
-            let _ = self
+        if auto_internal
+            && self
                 .saved_display
-                .switch_to_internal_if_extended(&tv_hint, self.is_lid_open());
+                .switch_to_internal_if_extended(&tv_hint, self.is_lid_open())
+        {
+            self.refresh_topology();
         }
-        self.refresh_topology();
         self.capture_last_pc_window();
         self.capture_pc_cursor_if_visible();
 
@@ -948,4 +944,84 @@ fn connect_and_install_client(
         );
     }
     Ok(())
+}
+
+/// Persists an Extend-mode auto-detected physical TV direction into `config.ini` whenever it
+/// changes, while leaving single-screen / duplicate fallbacks untouched (0 disk writes when unchanged).
+fn persist_detected_edge_side(cfg: &Arc<Mutex<AppConfig>>, topo: &DisplayTopology) -> bool {
+    if !topo.edge_trigger_is_ghost {
+        return false;
+    }
+    let Some(side) = topo.edge_side else {
+        return false;
+    };
+    if let Ok(mut c) = cfg.lock() {
+        if c.tv_edge_side != side {
+            c.tv_edge_side = side;
+            c.save();
+            diag_log!("TOPO", "auto-saved TvEdgeSide={}", side.as_str());
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::display::MonitorDesc;
+    use windows_sys::Win32::Foundation::RECT;
+
+    fn dummy_topo(is_ghost: bool, side: Option<EdgeSide>) -> DisplayTopology {
+        let r = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        DisplayTopology {
+            visible_pc_monitors: vec![MonitorDesc {
+                is_internal: true,
+                rect: r,
+                work_area: r,
+                dpi_scale: 1.0,
+            }],
+            tv_ghost_monitor: None,
+            edge_side: side,
+            edge_trigger_rect: Some(r),
+            edge_trigger_is_ghost: is_ghost,
+            seam_coord: 0,
+            return_cursor_pt: POINT { x: 100, y: 100 },
+            pc_fence_rect: None,
+        }
+    }
+
+    #[test]
+    fn persist_detected_edge_side_saves_only_on_real_extend_change() {
+        let tmp = std::env::temp_dir().join(format!(
+            "mikvm_edge_side_test_{}.ini",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&tmp);
+        let cfg = Arc::new(Mutex::new(AppConfig::load(tmp.clone())));
+
+        // Single-screen fallback must NOT overwrite config
+        assert!(!persist_detected_edge_side(
+            &cfg,
+            &dummy_topo(false, Some(EdgeSide::Right))
+        ));
+        assert_eq!(cfg.lock().unwrap().tv_edge_side, EdgeSide::Left);
+
+        // Extend-mode ghost seam detection updates memory AND persists to disk
+        assert!(persist_detected_edge_side(
+            &cfg,
+            &dummy_topo(true, Some(EdgeSide::Right))
+        ));
+        assert_eq!(cfg.lock().unwrap().tv_edge_side, EdgeSide::Right);
+        let reloaded = AppConfig::load(tmp.clone());
+        assert_eq!(reloaded.tv_edge_side, EdgeSide::Right);
+
+        // Repeating the same side is a no-op (no unnecessary disk write)
+        assert!(!persist_detected_edge_side(
+            &cfg,
+            &dummy_topo(true, Some(EdgeSide::Right))
+        ));
+
+        let _ = std::fs::remove_file(&tmp);
+    }
 }
