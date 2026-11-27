@@ -762,6 +762,11 @@ impl DeviceController {
         }
     }
 
+    pub fn start_persistent_shell_async(self: &Arc<Self>) {
+        let dev = Arc::clone(self);
+        std::thread::spawn(move || dev.start_persistent_shell());
+    }
+
     pub fn stop_persistent_shell(&self) {
         if let Ok(mut guard) = self.shell.lock() {
             if let Some(mut ps) = guard.take() {
@@ -770,6 +775,11 @@ impl DeviceController {
                 let _ = ps.child.wait();
             }
         }
+    }
+
+    pub fn stop_persistent_shell_async(self: &Arc<Self>) {
+        let dev = Arc::clone(self);
+        std::thread::spawn(move || dev.stop_persistent_shell());
     }
 
     pub fn send_shell_cmd_fast(self: &Arc<Self>, cmd: String) {

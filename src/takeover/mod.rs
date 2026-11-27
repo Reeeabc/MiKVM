@@ -26,8 +26,8 @@ use edge::{
 };
 use hooks::{
     install_keyboard_hook, install_mouse_hook, release_pc_modifiers_and_swallow,
-    set_raw_input_device, swallow_currently_held_modifiers, uninstall_keyboard_hook,
-    uninstall_mouse_hook, StickyKeysGuard,
+    reset_dead_client_guard, set_raw_input_device, swallow_currently_held_modifiers,
+    uninstall_keyboard_hook, uninstall_mouse_hook, StickyKeysGuard,
 };
 use state::*;
 use std::path::PathBuf;
@@ -63,6 +63,19 @@ pub struct TakeoverSession {
     fence_active: bool,
     last_clip_seq: u32,
     last_synced_clip: String,
+}
+
+/// Lightweight cloneable snapshot used to establish the control channel on a background thread
+/// WITHOUT holding `TakeoverSession`'s mutex across network/ADB I/O (prevents UI thread stalls!).
+pub struct StartControlParams {
+    scrcpy_dir: PathBuf,
+    adb_path: PathBuf,
+    cfg: Arc<Mutex<AppConfig>>,
+    dev: Arc<DeviceController>,
+    host_hwnd: usize,
+    client: Arc<Mutex<Option<Arc<ScrcpyControlClient>>>>,
+    recovery_gen: Arc<AtomicU32>,
+    recovering: Arc<AtomicBool>,
 }
 
 impl TakeoverSession {
@@ -181,30 +194,52 @@ impl TakeoverSession {
         persist_detected_edge_side(&self.cfg, &self.topo);
     }
 
-    /// Blocking connect called on background worker thread; posts WM_CONTROL_READY on success.
-    pub fn start_control_blocking(&self) -> Result<(), String> {
-        self.recovery_gen.fetch_add(1, Ordering::AcqRel);
-        self.recovering.store(false, Ordering::Release);
-        if self.is_running() {
+    /// Captures a lock-free parameter snapshot so background threads never hold `takeover.lock()`
+    /// across blocking ADB/TCP handshakes.
+    pub fn start_control_params(&self) -> StartControlParams {
+        StartControlParams {
+            scrcpy_dir: self.scrcpy_dir.clone(),
+            adb_path: self.adb_path.clone(),
+            cfg: Arc::clone(&self.cfg),
+            dev: Arc::clone(&self.dev),
+            host_hwnd: self.host_hwnd,
+            client: Arc::clone(&self.client),
+            recovery_gen: Arc::clone(&self.recovery_gen),
+            recovering: Arc::clone(&self.recovering),
+        }
+    }
+
+    /// Blocking connect called on background worker thread WITHOUT holding `TakeoverSession` lock;
+    /// posts `WM_CONTROL_READY` on success.
+    pub fn run_start_control_blocking(params: StartControlParams) -> Result<(), String> {
+        params.recovery_gen.fetch_add(1, Ordering::AcqRel);
+        params.recovering.store(false, Ordering::Release);
+        let already_running = params
+            .client
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|c| c.is_alive()))
+            .unwrap_or(false);
+        if already_running {
             unsafe {
-                PostMessageW(self.host_hwnd as HWND, WM_CONTROL_READY, 0, 0);
+                PostMessageW(params.host_hwnd as HWND, WM_CONTROL_READY, 0, 0);
             }
             return Ok(());
         }
-        let server_path = self.scrcpy_dir.join("scrcpy-server");
-        let addr = self
+        let server_path = params.scrcpy_dir.join("scrcpy-server");
+        let addr = params
             .cfg
             .lock()
             .map(|c| c.tv_address.clone())
             .unwrap_or_default();
 
         connect_and_install_client(
-            &self.dev,
-            &self.adb_path,
+            &params.dev,
+            &params.adb_path,
             server_path,
             addr,
-            self.host_hwnd,
-            &self.client,
+            params.host_hwnd,
+            &params.client,
             false,
         )
     }
@@ -212,6 +247,7 @@ impl TakeoverSession {
     pub fn on_control_ready_ui(&mut self, prefer_standby: bool) {
         self.recovering.store(false, Ordering::Release);
         self.suspended_was_active = false;
+        reset_dead_client_guard();
         self.sync_config();
         // Capture & persist the real Extend seam side BEFORE AutoInternalOnTv collapses to single-screen!
         self.refresh_topology();
@@ -230,7 +266,7 @@ impl TakeoverSession {
         self.capture_last_pc_window();
         self.capture_pc_cursor_if_visible();
 
-        self.dev.start_persistent_shell();
+        self.dev.start_persistent_shell_async();
         self.dev.set_keep_warm(true);
 
         if self.topo.has_visible_pc() {
@@ -297,9 +333,10 @@ impl TakeoverSession {
 
     fn teardown_transport_keep_display(&mut self) {
         self.enter_mode(TakeoverMode::Idle);
+        reset_dead_client_guard();
         self.stop_edge_sensor();
         self.stop_dp_return_watcher();
-        self.dev.stop_persistent_shell();
+        self.dev.stop_persistent_shell_async();
         self.dev.set_keep_warm(false);
 
         if let Ok(mut gg) = GLOBAL_CLIENT.lock() {
@@ -553,14 +590,27 @@ impl TakeoverSession {
     }
 
     fn stop_edge_sensor(&self) {
-        self.edge_sensor_gen.fetch_add(1, Ordering::AcqRel);
+        let gen = self.edge_sensor_gen.fetch_add(1, Ordering::AcqRel) + 1;
         TV_STRIP_SIDE.store(TV_SIDE_NONE, Ordering::Release);
         TV_EDGE_ACTIVE.store(false, Ordering::Release);
         TV_EDGE_PUSH_ACCUM.store(0, Ordering::Relaxed);
-        let old = self.edge_sensor.lock().ok().and_then(|mut g| g.take());
-        if let Some(sensor) = old {
-            std::thread::spawn(move || sensor.shutdown());
-        }
+        let slot = Arc::clone(&self.edge_sensor);
+        let gen_ref = Arc::clone(&self.edge_sensor_gen);
+        std::thread::spawn(move || {
+            if gen_ref.load(Ordering::Acquire) != gen {
+                return;
+            }
+            let old = slot.lock().ok().and_then(|mut g| {
+                if gen_ref.load(Ordering::Acquire) == gen {
+                    g.take()
+                } else {
+                    None
+                }
+            });
+            if let Some(sensor) = old {
+                sensor.shutdown();
+            }
+        });
     }
 
     pub fn toggle_focus_ui(&mut self) -> TakeoverMode {

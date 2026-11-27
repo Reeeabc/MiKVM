@@ -249,14 +249,16 @@ fn handle_source_click(src: SignalSource) {
 
         if src == SignalSource::TvSystem {
             if auto_to {
-                let res = takeover.lock().map(|to| to.start_control_blocking());
-                if let Ok(Err(err_msg)) = res {
-                    let msg = Box::into_raw(Box::new(err_msg)) as LPARAM;
-                    unsafe {
-                        PostMessageW(hwnd as HWND, WM_SHOW_BALLOON, 0, msg);
+                let params = takeover.lock().ok().map(|to| to.start_control_params());
+                if let Some(p) = params {
+                    if let Err(err_msg) = TakeoverSession::run_start_control_blocking(p) {
+                        let msg = Box::into_raw(Box::new(err_msg)) as LPARAM;
+                        unsafe {
+                            PostMessageW(hwnd as HWND, WM_SHOW_BALLOON, 0, msg);
+                        }
+                        BUSY.store(false, Ordering::Release);
+                        return;
                     }
-                    BUSY.store(false, Ordering::Release);
-                    return;
                 }
             }
             let _ = dev.switch_to_tv_desktop();
@@ -308,10 +310,13 @@ fn start_control_only() {
 
     std::thread::spawn(move || {
         if ensure_connected_or_rediscover(hwnd, &cfg, &dev, &addr) {
-            if let Ok(Err(e)) = takeover.lock().map(|to| to.start_control_blocking()) {
-                let msg = Box::into_raw(Box::new(e)) as LPARAM;
-                unsafe {
-                    PostMessageW(hwnd as HWND, WM_SHOW_BALLOON, 0, msg);
+            let params = takeover.lock().ok().map(|to| to.start_control_params());
+            if let Some(p) = params {
+                if let Err(e) = TakeoverSession::run_start_control_blocking(p) {
+                    let msg = Box::into_raw(Box::new(e)) as LPARAM;
+                    unsafe {
+                        PostMessageW(hwnd as HWND, WM_SHOW_BALLOON, 0, msg);
+                    }
                 }
             }
         }
