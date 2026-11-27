@@ -60,12 +60,17 @@ jobs:
           Copy-Item dist/scrcpy-bin/* dist/MiKVM-full/scrcpy/ -Recurse -Force
           Compress-Archive -Path dist/MiKVM-full/* -DestinationPath dist/MiKVM-windows-x64-full.zip -Force
 
-          # 3. SHA256 checksums
+          # 3. Optional TV Xposed module APK (Fcitx5TvFix)
+          Copy-Item extras/Fcitx5TvFix/Fcitx5TvFix-v1.0.0.apk dist/Fcitx5TvFix-v1.0.0.apk -Force
+
+          # 4. SHA256 checksums
           $hFull = (Get-FileHash dist/MiKVM-windows-x64-full.zip -Algorithm SHA256).Hash
           $hLite = (Get-FileHash dist/MiKVM-windows-x64-lite.zip -Algorithm SHA256).Hash
+          $hApk = (Get-FileHash dist/Fcitx5TvFix-v1.0.0.apk -Algorithm SHA256).Hash
           @(
             "$hFull  MiKVM-windows-x64-full.zip"
             "$hLite  MiKVM-windows-x64-lite.zip"
+            "$hApk  Fcitx5TvFix-v1.0.0.apk"
           ) | Out-File -Encoding ascii dist/SHA256SUMS.txt
 
       - name: Upload build artifacts
@@ -75,6 +80,7 @@ jobs:
           path: |
             dist/MiKVM-windows-x64-full.zip
             dist/MiKVM-windows-x64-lite.zip
+            dist/Fcitx5TvFix-v1.0.0.apk
             dist/SHA256SUMS.txt
 
       - name: Prepare release metadata from annotated tag
@@ -112,6 +118,7 @@ jobs:
           files: |
             dist/MiKVM-windows-x64-full.zip
             dist/MiKVM-windows-x64-lite.zip
+            dist/Fcitx5TvFix-v1.0.0.apk
             dist/SHA256SUMS.txt
 
       - name: Update GitHub Release (auto-generated notes fallback)
@@ -123,4 +130,21 @@ jobs:
           files: |
             dist/MiKVM-windows-x64-full.zip
             dist/MiKVM-windows-x64-lite.zip
+            dist/Fcitx5TvFix-v1.0.0.apk
             dist/SHA256SUMS.txt
+
+      - name: Ensure existing releases include Fcitx5TvFix APK
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tags = gh release list --limit 20 --json tagName -q '.[].tagName'
+          foreach ($t in $tags) {
+            if (-not $t) { continue }
+            $assets = gh release view $t --json assets -q '.assets[].name'
+            if ($assets -notcontains 'Fcitx5TvFix-v1.0.0.apk') {
+              Write-Host "Backfilling Fcitx5TvFix-v1.0.0.apk to $t..."
+              gh release upload $t dist/Fcitx5TvFix-v1.0.0.apk
+            }
+          }

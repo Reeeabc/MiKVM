@@ -47,7 +47,8 @@ Compile with Java 8 bytecode (`D:\develop\Java\jdk\bin\javac.exe --release 8 -d 
 - Pushing any `v*` tag (e.g., `git tag -a v2.1.0 -m "..." && git push origin v2.1.0`) triggers `.github/workflows/release.yml` on `windows-latest` (MSVC).
 - Automatically produces and attaches to GitHub Releases:
   - `MiKVM-windows-x64-full.zip` (bundles official `adb` + `scrcpy-server` under `scrcpy/`)
-  - `MiKVM-windows-x64-lite.zip` (~180 KB binary + `assets/*.jar` + docs)
+  - `MiKVM-windows-x64-lite.zip` (~200 KB binary + `assets/*.jar` + docs)
+  - `Fcitx5TvFix-v1.0.0.apk` (optional HyperOS TV Xposed/Vector module for Fcitx5 Android)
   - `SHA256SUMS.txt`
 - `build.rs` embeds `assets/app.manifest` (ComCtl32 v6 + PerMonitorV2 DPI) via `windres` (GNU) or `rc` (MSVC).
 
