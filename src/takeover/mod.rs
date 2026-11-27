@@ -7,7 +7,7 @@ pub use hooks::handle_raw_input;
 pub use state::{
     current_mode, TakeoverMode, WM_CONTROL_EXITED, WM_CONTROL_READY, WM_DP_RETURNED,
     WM_EDGE_ENTER_TV, WM_RECOVERY_FAILED, WM_TRIGGER_RETURN_DP, WM_TRIGGER_TOGGLE_FOCUS,
-    WM_TV_CLIPBOARD, WM_TV_EDGE_EXIT,
+    WM_TV_CLIPBOARD, WM_TV_EDGE_EXIT, WM_TV_IP_UPDATED,
 };
 
 use crate::adb::DeviceController;
@@ -318,6 +318,7 @@ impl TakeoverSession {
 
         let gen_ref = Arc::clone(&self.recovery_gen);
         let recovering_ref = Arc::clone(&self.recovering);
+        let cfg_ref = Arc::clone(&self.cfg);
         let dev = Arc::clone(&self.dev);
         let adb_path = self.adb_path.clone();
         let server_path = self.scrcpy_dir.join("scrcpy-server");
@@ -379,6 +380,55 @@ impl TakeoverSession {
                         }
                     }
                     None => {}
+                }
+            }
+
+            // Router DHCP IP-change fallback: if direct reconnect to old IP failed, scan LAN once
+            // for a verified Xiaomi/Redmi TV/monitor and auto-update config.ini if found.
+            if !cancelled() {
+                let gen_scan = Arc::clone(&gen_ref);
+                if let Some(found) = crate::lan_scan::rediscover_xiaomi_tv(
+                    &dev,
+                    &addr,
+                    move || gen_scan.load(Ordering::Acquire) != gen,
+                ) {
+                    if !cancelled() {
+                        crate::lan_scan::apply_rediscovered_address(&cfg_ref, &dev, &found);
+                        let notice = Box::into_raw(Box::new(format!(
+                            "检测到电视 IP 变更为 {}（{}），已自动更新并重连",
+                            found.addr, found.label
+                        ))) as LPARAM;
+                        unsafe {
+                            PostMessageW(host as HWND, WM_TV_IP_UPDATED, 0, notice);
+                        }
+                        match dev.is_tv_on_tv_system() {
+                            Some(false) => {
+                                recovering_ref.store(false, Ordering::Release);
+                                if !cancelled() {
+                                    unsafe {
+                                        PostMessageW(host as HWND, WM_DP_RETURNED, 0, 0);
+                                    }
+                                }
+                                return;
+                            }
+                            Some(true) => {
+                                if connect_and_install_client(
+                                    &dev,
+                                    &adb_path,
+                                    server_path.clone(),
+                                    found.addr.clone(),
+                                    host,
+                                    &client_slot,
+                                    true,
+                                )
+                                .is_ok()
+                                {
+                                    return;
+                                }
+                            }
+                            None => {}
+                        }
+                    }
                 }
             }
 

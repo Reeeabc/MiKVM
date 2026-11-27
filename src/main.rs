@@ -30,11 +30,13 @@ use crate::flyout::{
     update_flyout_status, was_just_hidden, FlyoutAction,
 };
 use crate::gdi::{create_tray_icon, GdipGuard};
+use crate::lan_scan::{apply_rediscovered_address, rediscover_xiaomi_tv};
 use crate::settings_ui::show_settings_window;
 use crate::takeover::{
     current_mode, handle_raw_input, TakeoverMode, TakeoverSession, WM_CONTROL_EXITED,
     WM_CONTROL_READY, WM_DP_RETURNED, WM_EDGE_ENTER_TV, WM_RECOVERY_FAILED,
     WM_TRIGGER_RETURN_DP, WM_TRIGGER_TOGGLE_FOCUS, WM_TV_CLIPBOARD, WM_TV_EDGE_EXIT,
+    WM_TV_IP_UPDATED,
 };
 use std::cell::RefCell;
 use std::ptr;
@@ -141,16 +143,53 @@ unsafe fn remove_tray_icon(hwnd: HWND) {
     Shell_NotifyIconW(NIM_DELETE, &nid);
 }
 
+fn ensure_connected_or_rediscover(
+    hwnd: usize,
+    cfg: &Arc<Mutex<AppConfig>>,
+    dev: &Arc<DeviceController>,
+    old_addr: &str,
+) -> bool {
+    if dev.ensure_connected() {
+        return true;
+    }
+    if let Some(found) = rediscover_xiaomi_tv(dev, old_addr, || false) {
+        apply_rediscovered_address(cfg, dev, &found);
+        let notice = Box::into_raw(Box::new(format!(
+            "检测到电视 IP 变更为 {}（{}），已自动更新并连接",
+            found.addr, found.label
+        ))) as LPARAM;
+        unsafe {
+            PostMessageW(hwnd as HWND, WM_TV_IP_UPDATED, 0, notice);
+        }
+        return true;
+    }
+    false
+}
+
 fn trigger_refresh(silent_if_connected: bool) {
-    let Some((hwnd, dev, addr)) = with_host(|h| {
+    let Some((hwnd, cfg, dev, addr)) = with_host(|h| {
         let addr = h.cfg.lock().map(|c| c.tv_address.clone()).unwrap_or_default();
-        (h.hwnd as usize, Arc::clone(&h.dev), addr)
+        (h.hwnd as usize, Arc::clone(&h.cfg), Arc::clone(&h.dev), addr)
     }) else {
         return;
     };
     set_flyout_refreshing(&addr, silent_if_connected);
     std::thread::spawn(move || {
-        let st = dev.query_status();
+        let mut st = dev.query_status();
+        // On explicit user reconnect click (red dot / refresh), also auto-scan LAN in case DHCP changed IP
+        if !st.connected && !silent_if_connected {
+            if let Some(found) = rediscover_xiaomi_tv(&dev, &addr, || false) {
+                apply_rediscovered_address(&cfg, &dev, &found);
+                let notice = Box::into_raw(Box::new(format!(
+                    "检测到电视 IP 变更为 {}（{}），已自动更新并连接",
+                    found.addr, found.label
+                ))) as LPARAM;
+                unsafe {
+                    PostMessageW(hwnd as HWND, WM_TV_IP_UPDATED, 0, notice);
+                }
+                st = dev.query_status();
+            }
+        }
         let boxed = Box::into_raw(Box::new(st)) as LPARAM;
         unsafe {
             PostMessageW(hwnd as HWND, WM_STATUS_UPDATED, 0, boxed);
@@ -199,7 +238,7 @@ fn handle_source_click(src: SignalSource) {
             })
             .unwrap_or_else(|_| (String::new(), true, 29, 23, 24));
 
-        if !dev.ensure_connected() {
+        if !ensure_connected_or_rediscover(hwnd, &cfg, &dev, &addr) {
             let msg = Box::into_raw(Box::new(format!("无法连接到 {}", addr))) as LPARAM;
             unsafe {
                 PostMessageW(hwnd as HWND, WM_SHOW_BALLOON, 0, msg);
@@ -253,15 +292,22 @@ fn start_control_only() {
     if BUSY.swap(true, Ordering::AcqRel) {
         return;
     }
-    let Some((hwnd, dev, takeover)) = with_host(|h| {
-        (h.hwnd as usize, Arc::clone(&h.dev), Arc::clone(&h.takeover))
+    let Some((hwnd, cfg, dev, takeover, addr)) = with_host(|h| {
+        let addr = h.cfg.lock().map(|c| c.tv_address.clone()).unwrap_or_default();
+        (
+            h.hwnd as usize,
+            Arc::clone(&h.cfg),
+            Arc::clone(&h.dev),
+            Arc::clone(&h.takeover),
+            addr,
+        )
     }) else {
         BUSY.store(false, Ordering::Release);
         return;
     };
 
     std::thread::spawn(move || {
-        if dev.ensure_connected() {
+        if ensure_connected_or_rediscover(hwnd, &cfg, &dev, &addr) {
             if let Ok(Err(e)) = takeover.lock().map(|to| to.start_control_blocking()) {
                 let msg = Box::into_raw(Box::new(e)) as LPARAM;
                 unsafe {
@@ -675,6 +721,13 @@ unsafe extern "system" fn host_wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                 TakeoverMode::Idle
             };
             set_flyout_optimistic_source(src, &addr, mode);
+            0
+        }
+        WM_TV_IP_UPDATED => {
+            if lp != 0 {
+                let text = Box::from_raw(lp as *mut String);
+                show_tray_balloon(hwnd, "MiKVM", &text);
+            }
             0
         }
         WM_SHOW_BALLOON => {

@@ -1,5 +1,5 @@
 use crate::adb::DeviceController;
-use crate::config::to_wide;
+use crate::config::{to_wide, AppConfig};
 use std::ffi::c_void;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -16,6 +16,7 @@ pub struct DiscoveredDevice {
     pub addr: String,
     pub label: String,
     pub is_xiaomi: bool,
+    pub is_tv_model: bool,
     pub adb_ready: bool,
 }
 
@@ -109,14 +110,11 @@ fn enumerate_local_private_ipv4s() -> Vec<Ipv4Addr> {
     out
 }
 
-pub(crate) fn build_scan_targets(
+pub(crate) fn build_subnet_prefixes(
     local_ips: &[Ipv4Addr],
     hint_ip: Option<Ipv4Addr>,
-) -> Vec<Ipv4Addr> {
+) -> Vec<[u8; 3]> {
     let mut prefixes: Vec<[u8; 3]> = Vec::new();
-    let mut self_ips: Vec<Ipv4Addr> = local_ips.to_vec();
-    self_ips.sort();
-    self_ips.dedup();
 
     // Prioritize the subnet of existing TvAddress first if private
     if let Some(hip) = hint_ip {
@@ -143,7 +141,18 @@ pub(crate) fn build_scan_targets(
         }
     }
     prefixes.truncate(MAX_SUBNETS);
+    prefixes
+}
 
+pub(crate) fn build_scan_targets(
+    local_ips: &[Ipv4Addr],
+    hint_ip: Option<Ipv4Addr>,
+) -> Vec<Ipv4Addr> {
+    let mut self_ips: Vec<Ipv4Addr> = local_ips.to_vec();
+    self_ips.sort();
+    self_ips.dedup();
+
+    let prefixes = build_subnet_prefixes(local_ips, hint_ip);
     let mut targets = Vec::with_capacity(prefixes.len() * 254);
     for p in prefixes {
         for host in 1u8..=254u8 {
@@ -156,7 +165,7 @@ pub(crate) fn build_scan_targets(
     targets
 }
 
-pub(crate) fn classify_adb_props(raw: &str) -> (String, bool) {
+pub(crate) fn classify_adb_props(raw: &str) -> (String, bool, bool) {
     let mut parts = raw.split('|').map(|s| s.trim());
     let model = parts.next().unwrap_or("");
     let mfg = parts.next().unwrap_or("");
@@ -167,6 +176,12 @@ pub(crate) fn classify_adb_props(raw: &str) -> (String, bool) {
         || combined.contains("mitv")
         || combined.contains("beekeeper")
         || combined.contains("fengmi");
+    let is_tv_model = is_xiaomi
+        && (combined.contains("mitv")
+            || combined.contains("beekeeper")
+            || combined.contains("monitor")
+            || combined.contains("fengmi")
+            || combined.contains("tv"));
 
     let label = if !model.is_empty() {
         model.to_string()
@@ -177,35 +192,44 @@ pub(crate) fn classify_adb_props(raw: &str) -> (String, bool) {
     } else {
         "Android ADB".to_string()
     };
-    (label, is_xiaomi)
+    (label, is_xiaomi, is_tv_model)
 }
 
 pub(crate) fn sort_discovered_devices(devs: &mut [DiscoveredDevice]) {
     devs.sort_by(|a, b| {
-        b.is_xiaomi
-            .cmp(&a.is_xiaomi)
+        b.is_tv_model
+            .cmp(&a.is_tv_model)
+            .then_with(|| b.is_xiaomi.cmp(&a.is_xiaomi))
             .then_with(|| b.adb_ready.cmp(&a.adb_ready))
             .then_with(|| a.addr.cmp(&b.addr))
     });
 }
 
-/// Scans local private `/24` LAN subnets for hosts with wireless ADB port (default 5555) open,
-/// verifies ADB connectivity, and ranks Xiaomi/Redmi TV/monitors first.
-pub fn scan_lan_adb_devices(dev: &Arc<DeviceController>, hint_addr: &str) -> Vec<DiscoveredDevice> {
-    let (hint_ip, port) = extract_hint_ipv4_and_port(hint_addr);
-    let locals = enumerate_local_private_ipv4s();
-    let targets = build_scan_targets(&locals, hint_ip);
-    diag_log!(
-        "SCAN",
-        "start port={} local_ifaces={} targets={}",
-        port,
-        locals.len(),
-        targets.len()
-    );
-    if targets.is_empty() {
+/// Strictly selects the best rediscovered Xiaomi/Redmi TV/monitor at a NEW address
+/// (never auto-adopts non-Xiaomi Android devices or the stale failed address).
+pub(crate) fn select_rediscovered_tv<'a>(
+    candidates: &'a [DiscoveredDevice],
+    old_addr: &str,
+) -> Option<&'a DiscoveredDevice> {
+    let old = old_addr.trim();
+    candidates
+        .iter()
+        .filter(|d| d.is_xiaomi && d.adb_ready && !d.addr.eq_ignore_ascii_case(old))
+        .max_by(|a, b| {
+            a.is_tv_model
+                .cmp(&b.is_tv_model)
+                .then_with(|| b.addr.cmp(&a.addr))
+        })
+}
+
+fn probe_open_ports(
+    targets: Vec<Ipv4Addr>,
+    port: u16,
+    is_cancelled: &Arc<dyn Fn() -> bool + Send + Sync>,
+) -> Vec<Ipv4Addr> {
+    if targets.is_empty() || is_cancelled() {
         return Vec::new();
     }
-
     let targets = Arc::new(targets);
     let next_idx = Arc::new(AtomicUsize::new(0));
     let open_ips = Arc::new(Mutex::new(Vec::<Ipv4Addr>::new()));
@@ -216,7 +240,11 @@ pub fn scan_lan_adb_devices(dev: &Arc<DeviceController>, hint_addr: &str) -> Vec
         let t = Arc::clone(&targets);
         let idx = Arc::clone(&next_idx);
         let found = Arc::clone(&open_ips);
+        let cancel = Arc::clone(is_cancelled);
         handles.push(std::thread::spawn(move || loop {
+            if cancel() {
+                break;
+            }
             let i = idx.fetch_add(1, Ordering::Relaxed);
             if i >= t.len() {
                 break;
@@ -234,47 +262,159 @@ pub fn scan_lan_adb_devices(dev: &Arc<DeviceController>, hint_addr: &str) -> Vec
         let _ = h.join();
     }
 
-    let ips = open_ips
-        .lock()
-        .map(|g| g.clone())
-        .unwrap_or_default();
+    open_ips.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
+fn identify_adb_host(dev: &Arc<DeviceController>, ip: Ipv4Addr, port: u16) -> DiscoveredDevice {
+    let addr = format!("{}:{}", ip, port);
+    let adb_ready = dev.test_connect(&addr);
+    let (label, is_xiaomi, is_tv_model) = if adb_ready {
+        let (_, out, _) = dev.run_adb(
+            &[
+                "-s",
+                &addr,
+                "shell",
+                "echo \"$(getprop ro.product.model)|$(getprop ro.product.manufacturer)|$(getprop ro.product.device)\"",
+            ],
+            2000,
+        );
+        classify_adb_props(&out)
+    } else {
+        ("端口开放 (待确认 ADB)".to_string(), false, false)
+    };
+    diag_log!(
+        "SCAN",
+        "candidate addr={} ready={} xiaomi={} tv={} label={}",
+        addr,
+        adb_ready,
+        is_xiaomi,
+        is_tv_model,
+        label
+    );
+    DiscoveredDevice {
+        addr,
+        label,
+        is_xiaomi,
+        is_tv_model,
+        adb_ready,
+    }
+}
+
+/// Scans local private `/24` LAN subnets for hosts with wireless ADB port (default 5555) open,
+/// verifies ADB connectivity, and ranks Xiaomi/Redmi TV/monitors first.
+pub fn scan_lan_adb_devices(dev: &Arc<DeviceController>, hint_addr: &str) -> Vec<DiscoveredDevice> {
+    let (hint_ip, port) = extract_hint_ipv4_and_port(hint_addr);
+    let locals = enumerate_local_private_ipv4s();
+    let targets = build_scan_targets(&locals, hint_ip);
+    diag_log!(
+        "SCAN",
+        "start port={} local_ifaces={} targets={}",
+        port,
+        locals.len(),
+        targets.len()
+    );
+    let never_cancel: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(|| false);
+    let ips = probe_open_ports(targets, port, &never_cancel);
 
     let mut results = Vec::with_capacity(ips.len());
     for ip in ips {
-        let addr = format!("{}:{}", ip, port);
-        let adb_ready = dev.test_connect(&addr);
-        let (label, is_xiaomi) = if adb_ready {
-            let (_, out, _) = dev.run_adb(
-                &[
-                    "-s",
-                    &addr,
-                    "shell",
-                    "echo \"$(getprop ro.product.model)|$(getprop ro.product.manufacturer)|$(getprop ro.product.device)\"",
-                ],
-                2000,
-            );
-            classify_adb_props(&out)
-        } else {
-            ("端口开放 (待确认 ADB)".to_string(), false)
-        };
-        diag_log!(
-            "SCAN",
-            "candidate addr={} ready={} xiaomi={} label={}",
-            addr,
-            adb_ready,
-            is_xiaomi,
-            label
-        );
-        results.push(DiscoveredDevice {
-            addr,
-            label,
-            is_xiaomi,
-            adb_ready,
-        });
+        results.push(identify_adb_host(dev, ip, port));
     }
 
     sort_discovered_devices(&mut results);
     results
+}
+
+/// Fast subnet-by-subnet auto-rediscovery when router DHCP reassigns the TV's IP.
+/// Probes the old address's `/24` subnet first (~1.7s) and stops as soon as a verified
+/// Xiaomi/Redmi TV/monitor is found at a new IP.
+pub fn rediscover_xiaomi_tv<F>(
+    dev: &Arc<DeviceController>,
+    old_addr: &str,
+    is_cancelled: F,
+) -> Option<DiscoveredDevice>
+where
+    F: Fn() -> bool + Send + Sync + 'static,
+{
+    let (old_ip, port) = extract_hint_ipv4_and_port(old_addr);
+    let locals = enumerate_local_private_ipv4s();
+    let prefixes = build_subnet_prefixes(&locals, old_ip);
+    if prefixes.is_empty() {
+        return None;
+    }
+
+    let cancel: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(is_cancelled);
+    diag_log!(
+        "SCAN",
+        "rediscover start old_addr={} subnets={}",
+        old_addr,
+        prefixes.len()
+    );
+
+    for p in prefixes {
+        if cancel() {
+            return None;
+        }
+        let mut targets = Vec::with_capacity(254);
+        for host in 1u8..=254u8 {
+            let ip = Ipv4Addr::new(p[0], p[1], p[2], host);
+            if Some(ip) == old_ip || locals.contains(&ip) {
+                continue;
+            }
+            targets.push(ip);
+        }
+        let open_ips = probe_open_ports(targets, port, &cancel);
+        if cancel() {
+            return None;
+        }
+        let mut found_in_subnet = Vec::with_capacity(open_ips.len());
+        for ip in open_ips {
+            if cancel() {
+                return None;
+            }
+            found_in_subnet.push(identify_adb_host(dev, ip, port));
+        }
+        if let Some(best) = select_rediscovered_tv(&found_in_subnet, old_addr) {
+            diag_log!(
+                "SCAN",
+                "rediscovered {} ({}) replacing {}",
+                best.addr,
+                best.label,
+                old_addr
+            );
+            return Some(best.clone());
+        }
+    }
+    None
+}
+
+/// Persists a newly rediscovered TV address into `config.ini` and clears stale ADB/daemon caches.
+pub fn apply_rediscovered_address(
+    cfg: &Arc<Mutex<AppConfig>>,
+    dev: &Arc<DeviceController>,
+    found: &DiscoveredDevice,
+) -> bool {
+    let updated = if let Ok(mut c) = cfg.lock() {
+        if c.tv_address != found.addr {
+            c.tv_address = found.addr.clone();
+            c.save();
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if updated {
+        dev.reset_stale_connections();
+        diag_log!(
+            "SCAN",
+            "auto-updated TvAddress={} ({})",
+            found.addr,
+            found.label
+        );
+    }
+    updated
 }
 
 #[cfg(test)]
@@ -324,29 +464,85 @@ mod tests {
 
     #[test]
     fn adb_prop_classification_and_ranking() {
-        let (lbl, mi) = classify_adb_props("MiTV-MFFU1|Xiaomi|beekeeper\n");
+        let (lbl, mi, tv) = classify_adb_props("MiTV-MFFU1|Xiaomi|beekeeper\n");
         assert_eq!(lbl, "MiTV-MFFU1");
         assert!(mi);
+        assert!(tv);
 
-        let (lbl2, mi2) = classify_adb_props("Pixel 8|Google|shiba\n");
+        let (lbl_phone, mi_phone, tv_phone) = classify_adb_props("24031PN0DC|Xiaomi|aurora\n");
+        assert_eq!(lbl_phone, "24031PN0DC");
+        assert!(mi_phone);
+        assert!(!tv_phone);
+
+        let (lbl2, mi2, tv2) = classify_adb_props("Pixel 8|Google|shiba\n");
         assert_eq!(lbl2, "Pixel 8");
         assert!(!mi2);
+        assert!(!tv2);
 
         let mut devs = vec![
             DiscoveredDevice {
                 addr: "192.168.1.50:5555".into(),
                 label: "Pixel 8".into(),
                 is_xiaomi: false,
+                is_tv_model: false,
                 adb_ready: true,
             },
             DiscoveredDevice {
-                addr: "192.168.1.200:5555".into(),
+                addr: "192.168.1.120:5555".into(),
+                label: "Xiaomi 14 Ultra".into(),
+                is_xiaomi: true,
+                is_tv_model: false,
+                adb_ready: true,
+            },
+            DiscoveredDevice {
+                addr: "192.168.1.205:5555".into(),
                 label: "MiTV-MFFU1".into(),
                 is_xiaomi: true,
+                is_tv_model: true,
                 adb_ready: true,
             },
         ];
         sort_discovered_devices(&mut devs);
-        assert_eq!(devs[0].addr, "192.168.1.200:5555");
+        assert_eq!(devs[0].addr, "192.168.1.205:5555");
+        assert_eq!(devs[1].addr, "192.168.1.120:5555");
+    }
+
+    #[test]
+    fn rediscovery_selector_prefers_xiaomi_tv_and_rejects_foreign_or_stale() {
+        let foreign_only = vec![DiscoveredDevice {
+            addr: "192.168.1.50:5555".into(),
+            label: "Pixel 8".into(),
+            is_xiaomi: false,
+            is_tv_model: false,
+            adb_ready: true,
+        }];
+        assert_eq!(select_rediscovered_tv(&foreign_only, "192.168.1.200:5555"), None);
+
+        let mixed = vec![
+            DiscoveredDevice {
+                addr: "192.168.1.200:5555".into(),
+                label: "MiTV-MFFU1".into(),
+                is_xiaomi: true,
+                is_tv_model: true,
+                adb_ready: true,
+            },
+            DiscoveredDevice {
+                addr: "192.168.1.110:5555".into(),
+                label: "Xiaomi 14".into(),
+                is_xiaomi: true,
+                is_tv_model: false,
+                adb_ready: true,
+            },
+            DiscoveredDevice {
+                addr: "192.168.1.208:5555".into(),
+                label: "MiTV-MFFU1".into(),
+                is_xiaomi: true,
+                is_tv_model: true,
+                adb_ready: true,
+            },
+        ];
+        // Skips old .200 and chooses TV model .208 ahead of Xiaomi phone .110
+        let picked = select_rediscovered_tv(&mixed, "192.168.1.200:5555").unwrap();
+        assert_eq!(picked.addr, "192.168.1.208:5555");
     }
 }
