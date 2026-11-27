@@ -73,19 +73,20 @@ impl TvEdgeSensor {
         initial_side: &str,
     ) -> Option<Self> {
         dev.ensure_jars_deployed();
-        // 1. Try rootless com.android.shell overlay first
+        // 1. Try rootless com.android.shell overlay first (100% self-contained MiTVEdge.jar,
+        //    zero dependency on scrcpy-server.jar internal classes)
         let _ = dev.shell(
             "appops set com.android.shell SYSTEM_ALERT_WINDOW allow >/dev/null 2>&1",
             2000,
         );
         let rootless_cmd = format!(
-            "CLASSPATH=/data/local/tmp/MiTVEdge.jar:/data/local/tmp/scrcpy-server.jar /system/bin/app_process /data/local/tmp MiTVEdge {}",
+            "CLASSPATH=/data/local/tmp/MiTVEdge.jar /system/bin/app_process /data/local/tmp MiTVEdge {}",
             initial_side
         );
         let started = Self::spawn_attempt(adb_path, addr, &rootless_cmd).or_else(|| {
             // 2. Fallback to rooted uid 1000 system overlay
             let rooted_cmd = format!(
-                "su 1000 -c 'CLASSPATH=/data/local/tmp/MiTVEdge.jar:/data/local/tmp/scrcpy-server.jar /system/bin/app_process /data/local/tmp MiTVEdge {}'",
+                "su 1000 -c 'CLASSPATH=/data/local/tmp/MiTVEdge.jar /system/bin/app_process /data/local/tmp MiTVEdge {}'",
                 initial_side
             );
             Self::spawn_attempt(adb_path, addr, &rooted_cmd)

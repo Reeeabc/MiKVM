@@ -1,3 +1,8 @@
+import android.content.AttributionSource;
+import android.content.ContentResolver;
+import android.content.Context;
+import android.content.ContextWrapper;
+import android.content.IContentProvider;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.lang.reflect.Constructor;
@@ -6,9 +11,9 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 
 /**
- * Ultra-lightweight 3px transparent TV edge hover sensor for MiKVM Phase 2.
- * Runs via `app_process` (no APK install required; supports both rootless `com.android.shell`
- * with `appops SYSTEM_ALERT_WINDOW allow` and rooted `su 1000`).
+ * Ultra-lightweight, 100% self-contained 3px transparent TV edge hover sensor for MiKVM Phase 2.
+ * Runs via `app_process` with ZERO dependency on `scrcpy-server` internal classes (supports both
+ * rootless `com.android.shell` with `appops SYSTEM_ALERT_WINDOW allow` and rooted `su 1000`).
  *
  * Protocol:
  *   stdout:
@@ -21,6 +26,137 @@ import java.lang.reflect.Proxy;
  *     Q                             - Remove view cleanly & System.exit(0)
  */
 public class MiTVEdge {
+    /**
+     * Minimal no-op ContentResolver backed by a dynamic IContentProvider proxy so ViewRootImpl /
+     * Settings.System / Settings.Global queries inside `app_process` cleanly fall back to defaults
+     * instead of throwing SecurityException or NullPointerException.
+     */
+    private static final class SafeContentResolver extends ContentResolver {
+        private final IContentProvider dummyProvider;
+
+        SafeContentResolver(Context ctx) {
+            super(ctx);
+            this.dummyProvider = createDummyProvider();
+        }
+
+        private static IContentProvider createDummyProvider() {
+            try {
+                final Class<?> bundleCls = Class.forName("android.os.Bundle");
+                final Constructor<?> bundleCtor = bundleCls.getConstructor();
+                return (IContentProvider) Proxy.newProxyInstance(
+                        IContentProvider.class.getClassLoader(),
+                        new Class<?>[]{IContentProvider.class},
+                        new InvocationHandler() {
+                            @Override
+                            public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+                                String name = method.getName();
+                                if ("toString".equals(name)) return "MiTVEdgeDummyProvider";
+                                if ("hashCode".equals(name)) return 0;
+                                if ("equals".equals(name)) return proxy == (args != null && args.length > 0 ? args[0] : null);
+                                Class<?> rt = method.getReturnType();
+                                if (rt == bundleCls) return bundleCtor.newInstance();
+                                if (rt == boolean.class) return Boolean.FALSE;
+                                if (rt == int.class) return 0;
+                                if (rt == long.class) return 0L;
+                                if (rt == float.class) return 0.0f;
+                                if (rt == double.class) return 0.0d;
+                                return null;
+                            }
+                        }
+                );
+            } catch (Throwable ignored) {
+                return null;
+            }
+        }
+
+        @Override
+        protected IContentProvider acquireProvider(Context c, String name) {
+            return dummyProvider;
+        }
+
+        @Override
+        public boolean releaseProvider(IContentProvider icp) {
+            return true;
+        }
+
+        @Override
+        protected IContentProvider acquireUnstableProvider(Context c, String name) {
+            return dummyProvider;
+        }
+
+        @Override
+        public boolean releaseUnstableProvider(IContentProvider icp) {
+            return true;
+        }
+
+        @Override
+        public void unstableProviderDied(IContentProvider icp) {
+        }
+    }
+
+    /**
+     * Self-contained ContextWrapper for `com.android.shell` / system `app_process` sessions
+     * (replaces any dependency on scrcpy's internal FakeContext).
+     */
+    private static final class ShellContext extends ContextWrapper {
+        private final int uid;
+        private final String pkgName;
+        private final ContentResolver safeCr;
+        private Object cachedAttrSrc;
+
+        ShellContext(Context base, int uid, String pkgName, ContentResolver safeCr) {
+            super(base);
+            this.uid = uid;
+            this.pkgName = pkgName;
+            this.safeCr = safeCr;
+        }
+
+        @Override
+        public String getPackageName() {
+            return pkgName;
+        }
+
+        @Override
+        public String getOpPackageName() {
+            return pkgName;
+        }
+
+        @Override
+        public Context getApplicationContext() {
+            return this;
+        }
+
+        @Override
+        public ContentResolver getContentResolver() {
+            return safeCr;
+        }
+
+        @Override
+        public Context createPackageContext(String packageName, int flags) {
+            return this;
+        }
+
+        @Override
+        public int getDeviceId() {
+            return 0; // Context.DEVICE_ID_DEFAULT (Android 14+)
+        }
+
+        @Override
+        public AttributionSource getAttributionSource() {
+            if (cachedAttrSrc != null) {
+                return (AttributionSource) cachedAttrSrc;
+            }
+            try {
+                Class<?> builderCls = Class.forName("android.content.AttributionSource$Builder");
+                Object builder = builderCls.getConstructor(int.class).newInstance(uid);
+                builderCls.getMethod("setPackageName", String.class).invoke(builder, pkgName);
+                cachedAttrSrc = builderCls.getMethod("build").invoke(builder);
+                return (AttributionSource) cachedAttrSrc;
+            } catch (Throwable ignored) {
+                return null;
+            }
+        }
+    }
     private static final int TYPE_APPLICATION_OVERLAY = 2038;
     private static final int FLAG_NOT_FOCUSABLE = 0x00000008;
     private static final int FLAG_NOT_TOUCHABLE = 0x00000010;
@@ -70,7 +206,6 @@ public class MiTVEdge {
 
             Class<?> atCls = Class.forName("android.app.ActivityThread");
             Object at = atCls.getMethod("systemMain").invoke(null);
-            Object sysCtx = atCls.getMethod("getSystemContext").invoke(at);
 
             int uid = -1;
             try {
@@ -80,37 +215,21 @@ public class MiTVEdge {
             } catch (Throwable ignored) {
             }
 
-            // Initialize Workarounds (from scrcpy-server.jar on classpath) when available
-            try {
-                Class<?> wkCls = Class.forName("com.genymobile.scrcpy.Workarounds");
-                wkCls.getMethod("apply").invoke(null);
-            } catch (Throwable ignored) {
-            }
+            String pkgName = (uid == 2000) ? "com.android.shell" : "android";
+            // Self-contained ActivityThread setup (replaces scrcpy Workarounds.apply())
+            applyLocalWorkarounds(at, pkgName);
 
-            Object ctx = sysCtx;
-            String pkgName = "android";
+            Context sysCtx = (Context) atCls.getMethod("getSystemContext").invoke(at);
             if (uid == 2000) {
-                pkgName = "com.android.shell";
                 patchShellContext(sysCtx, uid, pkgName);
             }
 
-            // Replace ContextImpl.mContentResolver with FakeContext's safe ContentResolver
-            // so ViewRootImpl.<init> -> Settings.System.getInt() never fails in app_process!
-            Object fakeCtx = null;
-            try {
-                Class<?> fcCls = Class.forName("com.genymobile.scrcpy.FakeContext");
-                fakeCtx = fcCls.getMethod("get").invoke(null);
-                if (fakeCtx != null) {
-                    Object safeCr = fakeCtx.getClass().getMethod("getContentResolver").invoke(fakeCtx);
-                    if (safeCr != null) {
-                        patchField(sysCtx, "mContentResolver", safeCr);
-                    }
-                    if (uid == 2000) {
-                        ctx = fakeCtx;
-                    }
-                }
-            } catch (Throwable ignored) {
-            }
+            // Install our self-contained SafeContentResolver + ShellContext so ViewRootImpl.<init>
+            // -> Settings.System.getInt() never fails in app_process without scrcpy-server.jar!
+            ContentResolver safeCr = new SafeContentResolver(sysCtx);
+            patchField(sysCtx, "mContentResolver", safeCr);
+            Context ctx = (uid == 2000) ? new ShellContext(sysCtx, uid, pkgName, safeCr) : sysCtx;
+            attachInitialApplication(at, ctx);
 
             windowMgr = ctx.getClass().getMethod("getSystemService", String.class).invoke(ctx, "window");
             if (windowMgr == null) {
@@ -242,6 +361,71 @@ public class MiTVEdge {
             fail(cause.getClass().getSimpleName() + ": " + cause.getMessage());
         }
         System.exit(0);
+    }
+
+    private static Object readField(Object obj, String fieldName) {
+        Class<?> c = obj.getClass();
+        while (c != null) {
+            try {
+                java.lang.reflect.Field f = c.getDeclaredField(fieldName);
+                f.setAccessible(true);
+                return f.get(obj);
+            } catch (Throwable ignored) {
+            }
+            c = c.getSuperclass();
+        }
+        return null;
+    }
+
+    private static void applyLocalWorkarounds(Object at, String pkgName) {
+        // 1. Populate ActivityThread.mBoundApplication with minimal ApplicationInfo
+        try {
+            if (readField(at, "mBoundApplication") == null) {
+                Class<?> appInfoCls = Class.forName("android.content.pm.ApplicationInfo");
+                Object appInfo = appInfoCls.getConstructor().newInstance();
+                patchField(appInfo, "packageName", pkgName);
+
+                Class<?> bindDataCls = Class.forName("android.app.ActivityThread$AppBindData");
+                Constructor<?> bindCtor = bindDataCls.getDeclaredConstructor();
+                bindCtor.setAccessible(true);
+                Object bindData = bindCtor.newInstance();
+                patchField(bindData, "appInfo", appInfo);
+                patchField(bindData, "processName", pkgName);
+                patchField(at, "mBoundApplication", bindData);
+            }
+        } catch (Throwable ignored) {
+        }
+
+        // 2. Populate ActivityThread.mConfigurationController on Android 12+ (API 31+) if absent
+        try {
+            if (readField(at, "mConfigurationController") == null) {
+                Class<?> ccCls = Class.forName("android.app.ConfigurationController");
+                for (Constructor<?> ctor : ccCls.getDeclaredConstructors()) {
+                    Class<?>[] params = ctor.getParameterTypes();
+                    if (params.length == 1 && params[0].isAssignableFrom(at.getClass())) {
+                        ctor.setAccessible(true);
+                        Object cc = ctor.newInstance(at);
+                        patchField(at, "mConfigurationController", cc);
+                        break;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void attachInitialApplication(Object at, Context ctx) {
+        try {
+            if (readField(at, "mInitialApplication") == null) {
+                Class<?> appCls = Class.forName("android.app.Application");
+                Object app = appCls.getConstructor().newInstance();
+                Method attach = appCls.getDeclaredMethod("attach", Context.class);
+                attach.setAccessible(true);
+                attach.invoke(app, ctx);
+                patchField(at, "mInitialApplication", app);
+            }
+        } catch (Throwable ignored) {
+        }
     }
 
     private static void patchField(Object obj, String fieldName, Object value) {
