@@ -389,17 +389,26 @@ pub(super) fn show_edge_trigger_window(hwnd: HWND, topo: &DisplayTopology) {
         hide_edge_trigger_window(hwnd);
         return;
     };
-    let adj_pc_rect = topo
+    let fallback_span = topo
         .pc_fence_rect
         .or_else(|| topo.visible_pc_monitors.first().map(|m| m.rect))
-        .unwrap_or(RECT { left: 0, top: 0, right: 1920, bottom: 1080 });
+        .map(|r| match side {
+            EdgeSide::Left | EdgeSide::Right => (r.top, r.bottom),
+            EdgeSide::Top | EdgeSide::Bottom => (r.left, r.right),
+        })
+        .unwrap_or((0, 1080));
+    let seam_span = if topo.seam_span.1 > topo.seam_span.0 {
+        topo.seam_span
+    } else {
+        fallback_span
+    };
     if let Ok(mut g) = EDGE_CFG.lock() {
         *g = Some(EdgeRuntimeCfg {
             side,
             seam: topo.seam_coord,
+            seam_span,
             is_ghost: topo.edge_trigger_is_ghost,
             tv_ghost_rect: topo.tv_ghost_monitor.as_ref().map(|m| m.rect),
-            adj_pc_rect,
         });
     }
     EDGE_DWELL_ACTIVE.store(false, Ordering::Release);
@@ -441,16 +450,17 @@ fn should_suppress_edge_crossing(tv_ghost_rect: Option<RECT>) -> bool {
     false
 }
 
-pub(super) fn compute_pc_entry_ratio_10k(side: EdgeSide, adj_pc_rect: RECT, pt: POINT) -> usize {
-    let r = adj_pc_rect;
-    let ratio = match side {
-        EdgeSide::Left | EdgeSide::Right => {
-            ((pt.y - r.top) as f32 / (r.bottom - r.top).max(1) as f32).clamp(0.0, 1.0)
-        }
-        EdgeSide::Top | EdgeSide::Bottom => {
-            ((pt.x - r.left) as f32 / (r.right - r.left).max(1) as f32).clamp(0.0, 1.0)
-        }
+pub(super) fn compute_pc_entry_ratio_10k(
+    side: EdgeSide,
+    seam_span: (i32, i32),
+    pt: POINT,
+) -> usize {
+    let (start, end) = seam_span;
+    let coord = match side {
+        EdgeSide::Left | EdgeSide::Right => pt.y,
+        EdgeSide::Top | EdgeSide::Bottom => pt.x,
     };
+    let ratio = ((coord - start) as f32 / (end - start).max(1) as f32).clamp(0.0, 1.0);
     (ratio * 10000.0).round() as usize
 }
 
@@ -463,7 +473,7 @@ fn fire_edge_enter(hwnd: HWND, cfg: EdgeRuntimeCfg) {
     unsafe {
         GetCursorPos(&mut pt);
     }
-    let ratio_10k = compute_pc_entry_ratio_10k(cfg.side, cfg.adj_pc_rect, pt);
+    let ratio_10k = compute_pc_entry_ratio_10k(cfg.side, cfg.seam_span, pt);
     let host = HOST_HWND_GLOBAL.load(Ordering::Acquire);
     if host != 0 {
         unsafe {
@@ -588,25 +598,32 @@ mod tests {
 
     #[test]
     fn pc_entry_ratio_vertical_and_horizontal() {
-        let laptop = RECT { left: 3840, top: 559, right: 6400, bottom: 2159 };
-        // Exact midpoint of 1600px tall monitor
+        // Standard 1600px vertical span [559, 2159]
         assert_eq!(
-            compute_pc_entry_ratio_10k(EdgeSide::Left, laptop, POINT { x: 3820, y: 1359 }),
+            compute_pc_entry_ratio_10k(EdgeSide::Left, (559, 2159), POINT { x: 3820, y: 1359 }),
             5000
         );
-        // Clamped above top / below bottom
+        // Staggered overlap span [400, 1600] maps 400 -> 0%, 1000 -> 50%, 1600 -> 100%
         assert_eq!(
-            compute_pc_entry_ratio_10k(EdgeSide::Left, laptop, POINT { x: 3820, y: 0 }),
+            compute_pc_entry_ratio_10k(EdgeSide::Left, (400, 1600), POINT { x: 3820, y: 400 }),
             0
         );
         assert_eq!(
-            compute_pc_entry_ratio_10k(EdgeSide::Right, laptop, POINT { x: 6420, y: 9999 }),
+            compute_pc_entry_ratio_10k(EdgeSide::Left, (400, 1600), POINT { x: 3820, y: 1000 }),
+            5000
+        );
+        // Clamped above start / below end
+        assert_eq!(
+            compute_pc_entry_ratio_10k(EdgeSide::Left, (559, 2159), POINT { x: 3820, y: 0 }),
+            0
+        );
+        assert_eq!(
+            compute_pc_entry_ratio_10k(EdgeSide::Right, (559, 2159), POINT { x: 6420, y: 9999 }),
             10000
         );
-        // Horizontal seam with negative coordinates
-        let top_mon = RECT { left: -2000, top: 0, right: 0, bottom: 1000 };
+        // Horizontal seam with negative coordinates [-2000, 0]
         assert_eq!(
-            compute_pc_entry_ratio_10k(EdgeSide::Top, top_mon, POINT { x: -500, y: -5 }),
+            compute_pc_entry_ratio_10k(EdgeSide::Top, (-2000, 0), POINT { x: -500, y: -5 }),
             7500
         );
     }

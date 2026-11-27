@@ -81,6 +81,10 @@ pub struct DisplayTopology {
     pub edge_trigger_rect: Option<RECT>,
     pub edge_trigger_is_ghost: bool,
     pub seam_coord: i32,
+    /// Shared overlap interval `(start, end)` along the axis parallel to the seam
+    /// (`Y` for Left/Right, `X` for Top/Bottom). Used for accurate PC <-> TV mapping on
+    /// staggered dual-monitor and 3-screen layouts.
+    pub seam_span: (i32, i32),
     pub return_cursor_pt: POINT,
     pub pc_fence_rect: Option<RECT>,
 }
@@ -88,6 +92,67 @@ pub struct DisplayTopology {
 impl DisplayTopology {
     pub fn has_visible_pc(&self) -> bool {
         !self.visible_pc_monitors.is_empty()
+    }
+
+    /// Maps a normalized TV-edge ratio (`0..=10000`) back onto a visible PC monitor point
+    /// along the actual shared overlap seam (`seam_span`).
+    pub fn point_on_pc_edge(&self, ratio_10k: usize) -> POINT {
+        let ratio = (ratio_10k.min(10000) as f32) / 10000.0;
+        let fallback_rect = self
+            .pc_fence_rect
+            .or_else(|| self.visible_pc_monitors.first().map(|m| m.rect));
+        let Some(def_r) = fallback_rect else {
+            return self.return_cursor_pt;
+        };
+        let side = self.edge_side.unwrap_or(EdgeSide::Left);
+        let (span_start, span_end) = if self.seam_span.1 > self.seam_span.0 {
+            self.seam_span
+        } else {
+            match side {
+                EdgeSide::Left | EdgeSide::Right => (def_r.top, def_r.bottom),
+                EdgeSide::Top | EdgeSide::Bottom => (def_r.left, def_r.right),
+            }
+        };
+        let len = (span_end - span_start).max(1);
+        let margin = (len / 4).min(8);
+        let lo = span_start + margin;
+        let hi = (span_end - margin).max(lo);
+        let pos = (span_start + (len as f32 * ratio).round() as i32).clamp(lo, hi);
+
+        let target_rect = self
+            .visible_pc_monitors
+            .iter()
+            .find(|m| match side {
+                EdgeSide::Left => {
+                    (m.rect.left - self.seam_coord).abs() <= 4
+                        && pos >= m.rect.top
+                        && pos < m.rect.bottom
+                }
+                EdgeSide::Right => {
+                    ((m.rect.right - 1) - self.seam_coord).abs() <= 4
+                        && pos >= m.rect.top
+                        && pos < m.rect.bottom
+                }
+                EdgeSide::Top => {
+                    (m.rect.top - self.seam_coord).abs() <= 4
+                        && pos >= m.rect.left
+                        && pos < m.rect.right
+                }
+                EdgeSide::Bottom => {
+                    ((m.rect.bottom - 1) - self.seam_coord).abs() <= 4
+                        && pos >= m.rect.left
+                        && pos < m.rect.right
+                }
+            })
+            .map(|m| m.rect)
+            .unwrap_or(def_r);
+
+        match side {
+            EdgeSide::Left => POINT { x: target_rect.left + 14, y: pos },
+            EdgeSide::Right => POINT { x: target_rect.right - 15, y: pos },
+            EdgeSide::Top => POINT { x: pos, y: target_rect.top + 14 },
+            EdgeSide::Bottom => POINT { x: pos, y: target_rect.bottom - 15 },
+        }
     }
 }
 
@@ -326,11 +391,20 @@ pub fn query_display_topology(
         }
     }
 
-    // Compute edge trigger geometry & safe return cursor position
+    build_display_topology(visible_pc_monitors, tv_ghost_monitor, fallback_side)
+}
+
+pub(crate) fn build_display_topology(
+    visible_pc_monitors: Vec<MonitorDesc>,
+    tv_ghost_monitor: Option<MonitorDesc>,
+    fallback_side: EdgeSide,
+) -> DisplayTopology {
+    // Compute edge trigger geometry, actual overlap seam span & safe return cursor position
     let mut edge_side = None;
     let mut edge_trigger_rect = None;
     let mut edge_trigger_is_ghost = false;
     let mut seam_coord = 0;
+    let mut seam_span = (0, 0);
     let mut return_cursor_pt = POINT { x: 100, y: 100 };
     let mut pc_fence_rect = None;
 
@@ -360,6 +434,7 @@ pub fn query_display_topology(
                 }
             }
 
+            let had_touching_seam = best.is_some();
             let (adj_pc, side) = if let Some((pc, s, _)) = best {
                 (pc, s)
             } else {
@@ -371,44 +446,53 @@ pub fn query_display_topology(
                 (pc, s)
             };
 
+            // Compute exact overlap interval along the seam (union across all touching PC monitors on this edge)
+            let mut union_span: Option<(i32, i32)> = None;
+            if had_touching_seam {
+                for pc in &visible_pc_monitors {
+                    let touches = match side {
+                        EdgeSide::Left => (tv.rect.right - pc.rect.left).abs() <= 4,
+                        EdgeSide::Right => (pc.rect.right - tv.rect.left).abs() <= 4,
+                        EdgeSide::Top => (tv.rect.bottom - pc.rect.top).abs() <= 4,
+                        EdgeSide::Bottom => (pc.rect.bottom - tv.rect.top).abs() <= 4,
+                    };
+                    if !touches {
+                        continue;
+                    }
+                    let (ov_start, ov_end) = match side {
+                        EdgeSide::Left | EdgeSide::Right => {
+                            (pc.rect.top.max(tv.rect.top), pc.rect.bottom.min(tv.rect.bottom))
+                        }
+                        EdgeSide::Top | EdgeSide::Bottom => {
+                            (pc.rect.left.max(tv.rect.left), pc.rect.right.min(tv.rect.right))
+                        }
+                    };
+                    if ov_end > ov_start {
+                        union_span = Some(match union_span {
+                            Some((s, e)) => (s.min(ov_start), e.max(ov_end)),
+                            None => (ov_start, ov_end),
+                        });
+                    }
+                }
+            }
+
+            seam_span = union_span.unwrap_or_else(|| match side {
+                EdgeSide::Left | EdgeSide::Right => (adj_pc.rect.top, adj_pc.rect.bottom),
+                EdgeSide::Top | EdgeSide::Bottom => (adj_pc.rect.left, adj_pc.rect.right),
+            });
+
             edge_side = Some(side);
             // Cover the ENTIRE invisible ghost TV monitor so even ultra-fast mouse flicks can't jump over it!
             edge_trigger_rect = Some(tv.rect);
             edge_trigger_is_ghost = true;
             pc_fence_rect = Some(adj_pc.rect);
 
-            let (seam, ret_pt) = match side {
-                EdgeSide::Left => (
-                    adj_pc.rect.left,
-                    POINT {
-                        x: adj_pc.rect.left + 12,
-                        y: (adj_pc.rect.top + adj_pc.rect.bottom) / 2,
-                    },
-                ),
-                EdgeSide::Right => (
-                    adj_pc.rect.right - 1,
-                    POINT {
-                        x: adj_pc.rect.right - 13,
-                        y: (adj_pc.rect.top + adj_pc.rect.bottom) / 2,
-                    },
-                ),
-                EdgeSide::Top => (
-                    adj_pc.rect.top,
-                    POINT {
-                        x: (adj_pc.rect.left + adj_pc.rect.right) / 2,
-                        y: adj_pc.rect.top + 12,
-                    },
-                ),
-                EdgeSide::Bottom => (
-                    adj_pc.rect.bottom - 1,
-                    POINT {
-                        x: (adj_pc.rect.left + adj_pc.rect.right) / 2,
-                        y: adj_pc.rect.bottom - 13,
-                    },
-                ),
+            seam_coord = match side {
+                EdgeSide::Left => adj_pc.rect.left,
+                EdgeSide::Right => adj_pc.rect.right - 1,
+                EdgeSide::Top => adj_pc.rect.top,
+                EdgeSide::Bottom => adj_pc.rect.bottom - 1,
             };
-            seam_coord = seam;
-            return_cursor_pt = ret_pt;
         } else {
             // PC screen only / Duplicate mode: no ghost screen exists, place a 2px strip on the outer border
             let pc = &visible_pc_monitors[0];
@@ -416,44 +500,54 @@ pub fn query_display_topology(
             edge_trigger_is_ghost = false;
             pc_fence_rect = None; // No ghost monitor to fall into!
 
-            let (trig, seam, ret_pt) = match fallback_side {
+            let (trig, seam, span, ret_pt) = match fallback_side {
                 EdgeSide::Left => (
                     RECT { left: pc.rect.left, top: pc.rect.top, right: pc.rect.left + 2, bottom: pc.rect.bottom },
                     pc.rect.left,
+                    (pc.rect.top, pc.rect.bottom),
                     POINT { x: pc.rect.left + 12, y: (pc.rect.top + pc.rect.bottom) / 2 },
                 ),
                 EdgeSide::Right => (
                     RECT { left: pc.rect.right - 2, top: pc.rect.top, right: pc.rect.right, bottom: pc.rect.bottom },
                     pc.rect.right - 1,
+                    (pc.rect.top, pc.rect.bottom),
                     POINT { x: pc.rect.right - 13, y: (pc.rect.top + pc.rect.bottom) / 2 },
                 ),
                 EdgeSide::Top => (
                     RECT { left: pc.rect.left, top: pc.rect.top, right: pc.rect.right, bottom: pc.rect.top + 2 },
                     pc.rect.top,
+                    (pc.rect.left, pc.rect.right),
                     POINT { x: (pc.rect.left + pc.rect.right) / 2, y: pc.rect.top + 12 },
                 ),
                 EdgeSide::Bottom => (
                     RECT { left: pc.rect.left, top: pc.rect.bottom - 2, right: pc.rect.right, bottom: pc.rect.bottom },
                     pc.rect.bottom - 1,
+                    (pc.rect.left, pc.rect.right),
                     POINT { x: (pc.rect.left + pc.rect.right) / 2, y: pc.rect.bottom - 13 },
                 ),
             };
             edge_trigger_rect = Some(trig);
             seam_coord = seam;
+            seam_span = span;
             return_cursor_pt = ret_pt;
         }
     }
 
-    DisplayTopology {
+    let mut topo = DisplayTopology {
         visible_pc_monitors,
         tv_ghost_monitor,
         edge_side,
         edge_trigger_rect,
         edge_trigger_is_ghost,
         seam_coord,
+        seam_span,
         return_cursor_pt,
         pc_fence_rect,
+    };
+    if topo.edge_trigger_is_ghost {
+        topo.return_cursor_pt = topo.point_on_pc_edge(5000);
     }
+    topo
 }
 
 pub fn rect_contains(r: &RECT, x: i32, y: i32) -> bool {
@@ -785,5 +879,85 @@ mod tests {
             assert_eq!(EdgeSide::parse(side.as_str()), Some(side));
         }
         assert_eq!(EdgeSide::parse("invalid"), None);
+    }
+
+    fn mon(left: i32, top: i32, right: i32, bottom: i32, is_internal: bool) -> MonitorDesc {
+        let rect = RECT { left, top, right, bottom };
+        MonitorDesc {
+            is_internal,
+            rect,
+            work_area: rect,
+            dpi_scale: 1.0,
+        }
+    }
+
+    #[test]
+    fn overlap_seam_staggered_dual_monitors() {
+        // Staggered vertical: TV [0..3840, 400..2560], Laptop [3840..6400, 0..1600]
+        // Shared vertical overlap is ONLY y in [400, 1600]
+        let topo = build_display_topology(
+            vec![mon(3840, 0, 6400, 1600, true)],
+            Some(mon(0, 400, 3840, 2560, false)),
+            EdgeSide::Left,
+        );
+        assert_eq!(topo.edge_side, Some(EdgeSide::Left));
+        assert_eq!(topo.seam_coord, 3840);
+        assert_eq!(topo.seam_span, (400, 1600));
+        // Midpoint of overlap seam is y = 1000 (not laptop midpoint 800!)
+        assert_eq!(topo.point_on_pc_edge(5000).y, 1000);
+        assert_eq!(topo.point_on_pc_edge(0).y, 408);
+        assert_eq!(topo.point_on_pc_edge(10000).y, 1592);
+
+        // Staggered top/bottom: TV [800..4640, -2160..0] above Laptop [0..2560, 0..1600]
+        // Shared horizontal overlap is ONLY x in [800, 2560]
+        let topo_top = build_display_topology(
+            vec![mon(0, 0, 2560, 1600, true)],
+            Some(mon(800, -2160, 4640, 0, false)),
+            EdgeSide::Left,
+        );
+        assert_eq!(topo_top.edge_side, Some(EdgeSide::Top));
+        assert_eq!(topo_top.seam_coord, 0);
+        assert_eq!(topo_top.seam_span, (800, 2560));
+        assert_eq!(topo_top.point_on_pc_edge(0).x, 808);
+        assert_eq!(topo_top.point_on_pc_edge(5000).x, 1680);
+        assert_eq!(topo_top.point_on_pc_edge(10000).x, 2552);
+    }
+
+    #[test]
+    fn overlap_seam_three_screen_stacked_pc_monitors() {
+        // TV on the left: [-3840..0, 0..2160]
+        // Two stacked PC monitors both bordering TV at x = 0:
+        // Upper [0..1920, 0..1080], Lower [0..2560, 1080..2160]
+        let topo = build_display_topology(
+            vec![
+                mon(0, 0, 1920, 1080, false),
+                mon(0, 1080, 2560, 2160, true),
+            ],
+            Some(mon(-3840, 0, 0, 2160, false)),
+            EdgeSide::Left,
+        );
+        assert_eq!(topo.edge_side, Some(EdgeSide::Left));
+        assert_eq!(topo.seam_span, (0, 2160));
+        let top_pt = topo.point_on_pc_edge(1000); // y = 216 (upper monitor)
+        let bot_pt = topo.point_on_pc_edge(9000); // y = 1944 (lower monitor)
+        assert_eq!(top_pt.x, 14);
+        assert_eq!(top_pt.y, 216);
+        assert_eq!(bot_pt.x, 14);
+        assert_eq!(bot_pt.y, 1944);
+    }
+
+    #[test]
+    fn single_screen_uses_full_pc_edge_span() {
+        let topo = build_display_topology(
+            vec![mon(0, 0, 2560, 1600, true)],
+            None,
+            EdgeSide::Right,
+        );
+        assert!(!topo.edge_trigger_is_ghost);
+        assert_eq!(topo.edge_side, Some(EdgeSide::Right));
+        assert_eq!(topo.seam_span, (0, 1600));
+        let pt = topo.point_on_pc_edge(5000);
+        assert_eq!(pt.x, 2545);
+        assert_eq!(pt.y, 800);
     }
 }

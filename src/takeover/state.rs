@@ -104,9 +104,9 @@ pub(super) static TV_PRIMED_ACCEL_X100: AtomicI32 = AtomicI32::new(300);
 pub(super) struct EdgeRuntimeCfg {
     pub(super) side: EdgeSide,
     pub(super) seam: i32,
+    pub(super) seam_span: (i32, i32),
     pub(super) is_ghost: bool,
     pub(super) tv_ghost_rect: Option<RECT>,
-    pub(super) adj_pc_rect: RECT,
 }
 
 pub(super) static EDGE_CFG: Mutex<Option<EdgeRuntimeCfg>> = Mutex::new(None);

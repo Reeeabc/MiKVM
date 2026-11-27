@@ -423,32 +423,7 @@ impl TakeoverSession {
     }
 
     fn point_on_pc_edge(&self, ratio_10k: usize) -> POINT {
-        let ratio = (ratio_10k.min(10000) as f32) / 10000.0;
-        let pc_rect = self
-            .topo
-            .pc_fence_rect
-            .or_else(|| self.topo.visible_pc_monitors.first().map(|m| m.rect));
-        let Some(r) = pc_rect else {
-            return self.topo.return_cursor_pt;
-        };
-        match self.topo.edge_side.unwrap_or(EdgeSide::Left) {
-            EdgeSide::Left => POINT {
-                x: r.left + 14,
-                y: (r.top + ((r.bottom - r.top) as f32 * ratio) as i32).clamp(r.top + 8, r.bottom - 8),
-            },
-            EdgeSide::Right => POINT {
-                x: r.right - 15,
-                y: (r.top + ((r.bottom - r.top) as f32 * ratio) as i32).clamp(r.top + 8, r.bottom - 8),
-            },
-            EdgeSide::Top => POINT {
-                x: (r.left + ((r.right - r.left) as f32 * ratio) as i32).clamp(r.left + 8, r.right - 8),
-                y: r.top + 14,
-            },
-            EdgeSide::Bottom => POINT {
-                x: (r.left + ((r.right - r.left) as f32 * ratio) as i32).clamp(r.left + 8, r.right - 8),
-                y: r.bottom - 15,
-            },
-        }
+        self.topo.point_on_pc_edge(ratio_10k)
     }
 
     fn desired_tv_edge_cmd(&self) -> (u8, &'static str) {
@@ -986,6 +961,7 @@ mod tests {
             edge_trigger_rect: Some(r),
             edge_trigger_is_ghost: is_ghost,
             seam_coord: 0,
+            seam_span: (0, 1080),
             return_cursor_pt: POINT { x: 100, y: 100 },
             pc_fence_rect: None,
         }
