@@ -85,6 +85,10 @@ jobs:
           [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
           $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
           $tag = $env:GITHUB_REF_NAME
+          # actions/checkout@v4 fetches the dereferenced commit SHA by default; explicitly fetch the annotated tag object
+          git fetch --force origin "+refs/tags/${tag}:refs/tags/${tag}"
+          $objType = (git cat-file -t "refs/tags/$tag" | Out-String).Trim()
+          Write-Host "Tag $tag object type: $objType"
           $subject = (git -c i18n.logOutputEncoding=UTF-8 tag -l --format="%(contents:subject)" $tag | Out-String).Trim()
           $body = (git -c i18n.logOutputEncoding=UTF-8 tag -l --format="%(contents:body)" $tag | Out-String).Trim()
           if (-not $subject) { $subject = $tag }
@@ -93,6 +97,7 @@ jobs:
           if ($body) {
             [System.IO.File]::WriteAllText((Join-Path $PWD "dist/RELEASE_NOTES.md"), $body, $utf8NoBom)
             [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, "has_notes=true`n", $utf8NoBom)
+            Write-Host "Extracted release notes ($($body.Length) chars) from tag $tag"
           } else {
             [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, "has_notes=false`n", $utf8NoBom)
           }
