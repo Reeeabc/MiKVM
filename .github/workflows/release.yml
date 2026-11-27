@@ -77,10 +77,43 @@ jobs:
             dist/MiKVM-windows-x64-lite.zip
             dist/SHA256SUMS.txt
 
-      - name: Update GitHub Release
+      - name: Prepare release metadata from annotated tag
         if: startsWith(github.ref, 'refs/tags/v')
+        id: relmeta
+        shell: pwsh
+        run: |
+          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+          $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+          $tag = $env:GITHUB_REF_NAME
+          $subject = (git -c i18n.logOutputEncoding=UTF-8 tag -l --format="%(contents:subject)" $tag | Out-String).Trim()
+          $body = (git -c i18n.logOutputEncoding=UTF-8 tag -l --format="%(contents:body)" $tag | Out-String).Trim()
+          if (-not $subject) { $subject = $tag }
+          $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+          [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, "title=$subject`n", $utf8NoBom)
+          if ($body) {
+            [System.IO.File]::WriteAllText((Join-Path $PWD "dist/RELEASE_NOTES.md"), $body, $utf8NoBom)
+            [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, "has_notes=true`n", $utf8NoBom)
+          } else {
+            [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, "has_notes=false`n", $utf8NoBom)
+          }
+
+      - name: Update GitHub Release (with tag release notes)
+        if: startsWith(github.ref, 'refs/tags/v') && steps.relmeta.outputs.has_notes == 'true'
         uses: softprops/action-gh-release@v2
         with:
+          name: ${{ steps.relmeta.outputs.title }}
+          body_path: dist/RELEASE_NOTES.md
+          generate_release_notes: false
+          files: |
+            dist/MiKVM-windows-x64-full.zip
+            dist/MiKVM-windows-x64-lite.zip
+            dist/SHA256SUMS.txt
+
+      - name: Update GitHub Release (auto-generated notes fallback)
+        if: startsWith(github.ref, 'refs/tags/v') && steps.relmeta.outputs.has_notes != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ steps.relmeta.outputs.title }}
           generate_release_notes: true
           files: |
             dist/MiKVM-windows-x64-full.zip

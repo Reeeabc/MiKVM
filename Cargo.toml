@@ -1,6 +1,6 @@
 [package]
 name = "mikvm"
-version = "2.1.0"
+version = "2.2.0"
 edition = "2021"
 description = "Ultra-lightweight Rust Win11 tray switcher & software KVM for Redmi G Pro 27U / Xiaomi Smart Monitors"
 license = "MIT"
